@@ -36,3 +36,7 @@ npm test
 ```
 
 `npm test` roda testes de integração contra `http://127.0.0.1:18080`. Use exclusivamente banco descartável: os testes criam contas e consultórios fictícios. Para outro endereço, configure `TEST_URL`.
+
+## Primeiro acesso
+
+Após criar uma conta, `/boas-vindas.html` orienta a configuração inicial: área de atuação, nome, telefone, horários e fuso. O consultório e a agenda são criados na mesma transação. Contas com consultório cadastrado entram diretamente no painel. Os primeiros passos acompanham os cadastros e podem ser recolhidos. A página pública continua separada da administração, e suas cores são escolhidas em Aparência da página.
