@@ -50,3 +50,7 @@ O menu do perfil inclui informações, assinatura profissional, sobre mim, conta
 ## Atendimento simultâneo
 
 Em Meu perfil → Limite de Agendamentos, o profissional pode herdar a capacidade padrão do consultório, escolher de 1 a 20 pacientes simultâneos ou permitir sobreposição sem limite fixo mediante confirmação explícita. A capacidade padrão permanece em 1 para agendas existentes. O limite diário continua sendo uma configuração separada. O backend calcula a concorrência real por intervalo, considera o fim de uma consulta disponível para a próxima e exige confirmação em sobreposições sem limite.
+
+## Publicação da página profissional
+
+Novos consultórios começam com a página pública desativada. Em Meu perfil → Página Pública, o responsável ativa ou desativa a publicação e salva as alterações. O endereço público retorna 404 enquanto desativado. A prévia usa um endpoint autenticado, restrito ao proprietário, e respeita as escolhas de visibilidade dos contatos. Cadastros anteriores sem a nova configuração mantêm sua publicação anterior.
