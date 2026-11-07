@@ -54,3 +54,9 @@ Em Meu perfil → Limite de Agendamentos, o profissional pode herdar a capacidad
 ## Publicação da página profissional
 
 Novos consultórios começam com a página pública desativada. Em Meu perfil → Página Pública, o responsável ativa ou desativa a publicação e salva as alterações. O endereço público retorna 404 enquanto desativado. A prévia usa um endpoint autenticado, restrito ao proprietário, e respeita as escolhas de visibilidade dos contatos. Cadastros anteriores sem a nova configuração mantêm sua publicação anterior.
+
+## Segurança da conta
+
+A tela de segurança informa claramente que a verificação por e-mail, a verificação em duas etapas e a confiança em dispositivos ainda não estão implementadas. Essas opções não são apresentadas como ativas. A troca de senha funciona e invalida as outras sessões. A conta pode listar as próprias sessões abertas, encerrar uma delas ou todas as outras. IDs de sessão públicos não são os tokens de autenticação; os tokens continuam em cookie HttpOnly e no banco somente como hash.
+
+As migrações acrescentam identificador, data de criação e descrição do navegador às sessões. Sessões antigas sem esses metadados são identificadas sem inventar uma data de início.
