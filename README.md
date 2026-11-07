@@ -40,3 +40,9 @@ npm test
 ## Primeiro acesso
 
 Após criar uma conta, `/boas-vindas.html` orienta a configuração inicial: área de atuação, nome, telefone, horários e fuso. O consultório e a agenda são criados na mesma transação. Contas com consultório cadastrado entram diretamente no painel. Os primeiros passos acompanham os cadastros e podem ser recolhidos. A página pública continua separada da administração, e suas cores são escolhidas em Aparência da página.
+
+## Perfil e privacidade
+
+Meu perfil abre em Informações, com dados pessoais e profissionais. CPF, nascimento, gênero e imagem de assinatura ficam na tabela privada `manu_private_profiles`, acessível apenas pela própria conta; não são retornados pela API pública do consultório. O salvamento dos dados pessoais e profissionais ocorre na mesma transação, com verificação de versões.
+
+O menu do perfil inclui informações, assinatura profissional, sobre mim, contato e endereço, procedimentos, horários, limite de agendamentos, página pública e segurança da conta. A imagem de assinatura é apenas um cadastro privado: não certifica nem assina documentos. A troca de senha exige a senha atual e encerra as outras sessões. Limites diários configurados também são verificados no backend.
