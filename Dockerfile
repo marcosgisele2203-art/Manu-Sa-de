@@ -1,5 +1,11 @@
-FROM nginxinc/nginx-unprivileged:1.28-alpine
-COPY --chown=101:101 deploy/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --chown=101:101 public/ /usr/share/nginx/html/
+FROM node:22-alpine
+ENV NODE_ENV=production PORT=8080
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=secret,id=proxy_ca if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; npm ci --omit=dev --ignore-scripts
+COPY --chown=node:node server.js ./
+COPY --chown=node:node public/ ./public/
+USER node
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget -Y off -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD node -e "require('http').get('http://127.0.0.1:8080/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+CMD ["node","server.js"]

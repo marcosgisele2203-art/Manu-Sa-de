@@ -1,35 +1,38 @@
 # Manu Saúde
 
-Plataforma em desenvolvimento para profissionais de saúde terem seu consultório online.
+Plataforma de consultórios online com Node.js 22, Express e PostgreSQL 17.
 
-## Estado atual
+## Funcionalidades
 
-Demonstração funcional em HTML, CSS e JavaScript. Inclui perfil personalizado, logo e foto, painel do profissional, calendário mensal, consultas, pacientes e configurações de atendimento.
+Cadastro e login com senhas protegidas por scrypt, sessões em cookie HttpOnly, acesso privado por proprietário, página pública do consultório, perfil com logo/foto, pacientes, agenda diária, calendário mensal compacto e catálogo de serviços. A gravação no banco verifica a versão dos dados para evitar sobrescrever alterações simultâneas e rejeita consultas sobrepostas ou novas consultas fora dos horários de atendimento.
 
-**Ainda não é um sistema para dados reais de pacientes.** Os dados ficam no localStorage do navegador, sem autenticação, base compartilhada, cobrança ou automação de WhatsApp. Publicar em outro domínio não transfere os dados salvos no domínio anterior.
+A recuperação de senha por e-mail, verificação de e-mail, assinaturas, cobrança, reserva pública automática e automação de WhatsApp ainda não estão habilitadas. O botão de WhatsApp abre uma mensagem para envio manual.
 
-## Implantar no EasyPanel
+## EasyPanel
 
-1. Conecte sua conta GitHub ao EasyPanel e autorize o repositório privado escolhido.
-2. Crie um projeto `manu-saude` e um serviço do tipo **App**.
-3. Em **Source / Origem**, escolha GitHub, o repositório e a branch `main`. Use a raiz do repositório como contexto.
-4. Em **Build / Compilação**, escolha **Dockerfile**, caminho `Dockerfile`.
-5. Configure a porta interna como **8080** (HTTP).
-6. Gere primeiro o endereço de teste do EasyPanel ou adicione seu domínio e ative HTTPS.
-7. Implante e confira `/healthz`, `/` e `/painel.html?consultorio=exemplo-ana`.
-8. Se desejar atualização a cada push, habilite o auto deploy do EasyPanel para esta branch.
+- Repositório: `marcosgisele2203-art/Manu-Sa-de`
+- Branch: `main`
+- Build: Dockerfile na raiz
+- Porta interna: **8080**, HTTP; domínio externo com **HTTPS**.
 
-Não são necessárias variáveis de ambiente ou volumes para esta demonstração. Não salve tokens, senhas ou arquivos `.env` no repositório. O código de frontend é público para quem acessa o site, inclusive se o repositório for privado.
+No serviço da aplicação, configure as variáveis `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` e `PGPASSWORD`, copiando os valores do banco pelo painel. Não envie a senha ao GitHub nem a mensagens. Opcionalmente, `APP_URL` pode receber o endereço HTTPS da plataforma, sem barra final, para fixar a origem permitida. `NODE_ENV=production` e `PORT=8080` já estão definidos no Dockerfile.
 
-## Teste local com Docker
+Ao iniciar, a aplicação cria as tabelas `manu_*` no banco configurado, sem alterar tabelas de outras aplicações. Não são necessários comandos SQL manuais. `/healthz` verifica a conexão com PostgreSQL. A aplicação não inicia se o banco estiver inacessível.
+
+Os arquivos de imagem são armazenados no perfil no banco, com limite de 500 KB por imagem. Configure backups do PostgreSQL no EasyPanel antes de usar informações reais. Use um banco exclusivo para a plataforma. Não exponha o banco à internet.
+
+Após implantar, acesse `/conta.html` e crie uma conta para testar. Cadastre o consultório, abra seu painel e agende uma consulta. Faça login em outro dispositivo para conferir a persistência. Os dados da demonstração antiga ficam no navegador e não são importados automaticamente.
+
+`/painel.html?consultorio=exemplo-ana` continua sendo um exemplo fictício, com dados locais. Consultórios de contas reais usam o backend e não gravam pacientes no localStorage.
+
+## Desenvolvimento e testes
 
 ```sh
-docker build -t manu-saude .
-docker run --rm -p 8080:8080 manu-saude
+npm ci
+# Defina as variáveis PG* para um PostgreSQL local de testes.
+PORT=18080 NODE_ENV=test npm start
+# Em outro terminal:
+npm test
 ```
 
-Abra `http://localhost:8080`.
-
-## Próxima etapa para produção
-
-Adicionar backend com autenticação e autorização por consultório, PostgreSQL com isolamento dos dados, armazenamento de imagens, agendamento público com controle de concorrência, backups e auditoria. A aplicação e o PostgreSQL poderão ser serviços separados no EasyPanel. O WhatsApp será uma integração no backend, com credenciais armazenadas no gerenciador de variáveis do EasyPanel.
+`npm test` roda testes de integração contra `http://127.0.0.1:18080`. Use exclusivamente banco descartável: os testes criam contas e consultórios fictícios. Para outro endereço, configure `TEST_URL`.
