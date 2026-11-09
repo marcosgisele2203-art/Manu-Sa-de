@@ -24,14 +24,18 @@ Node 22, ES modules (`"type": "module"`). Dependências: só `express` e `pg`.
 ```bash
 npm ci
 # terminal 1: servidor apontando para um Postgres DESCARTÁVEL
-PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=manutest PORT=18080 NODE_ENV=test npm start
+PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=manutest PORT=18080 NODE_ENV=test \
+  EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution npm start
 # terminal 2:
-npm test        # 11 testes de integração em http://127.0.0.1:18080 (ou TEST_URL)
+npm test        # testes de integração em http://127.0.0.1:18080 (ou TEST_URL)
 ```
 
 - Os testes **precisam** do servidor no ar e de um banco Postgres. Sem isso, todos falham.
 - Os testes criam contas e consultórios fictícios: **nunca** rode contra o banco de produção.
 - O servidor cria as tabelas sozinho ao iniciar.
+- O teste do WhatsApp sobe uma Evolution falsa na porta 18091 (por isso as variáveis `EVOLUTION_*` acima).
+  Nunca aponte os testes para a Evolution de verdade.
+- Rodar a suíte várias vezes no mesmo banco esbarra no limite de cadastros por IP (429): recrie o banco de teste.
 
 Antes de abrir um PR: `npm test` passando com o servidor local.
 
