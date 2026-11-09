@@ -37,7 +37,17 @@ No serviço da aplicação, configure:
 
 O webhook fica em `/webhook/whatsapp/<consultório>/<segredo>`; o segredo é gerado a cada conexão e só o hash fica no banco. Mensagens de grupos são ignoradas. As mensagens (texto e o tipo de mídia: áudio, imagem, documento) ficam na tabela `manu_whatsapp_messages` e aparecem só para o dono do consultório. São dados de saúde: mantenha backups protegidos.
 
-Por enquanto o sistema **só recebe** as mensagens; as respostas continuam no celular do profissional.
+### Atendimento automático por menu
+
+Em Meu WhatsApp, o profissional liga **Atendimento automático por menu**. Quem mandar mensagem recebe um menu numerado:
+
+1. **Agendar consulta**: escolhe o serviço (pulado se houver só um), o dia (próximos dias com vaga), o horário, a modalidade (se o consultório atende presencial e online) e informa o nome se ainda não for paciente. A consulta entra na agenda como **Agendada**, com a etiqueta "Agendado pelo WhatsApp".
+2. **Ver ou cancelar meu horário**: lista as próximas consultas do número (o paciente é reconhecido pelo telefone, com ou sem 55 e nono dígito) e permite cancelar.
+3. **Falar com o profissional**: pausa o atendimento automático por 12 horas para essa pessoa.
+
+Os horários usam as mesmas regras da agenda e da página pública: dias e horários de atendimento, capacidade, limite diário e fuso do consultório. A marcação é conferida de novo dentro de uma transação, então dois pacientes não ficam com a última vaga.
+
+Se o profissional responder um paciente pelo próprio celular, o atendimento automático pausa por 12 horas com aquela pessoa. Uma conversa parada por 30 minutos recomeça do menu. Áudios e imagens ainda não são entendidos: o paciente recebe o menu. O estado de cada conversa fica em `manu_whatsapp_sessions`.
 
 ## Desenvolvimento e testes
 

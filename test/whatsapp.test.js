@@ -10,7 +10,7 @@ const base=process.env.TEST_URL||'http://127.0.0.1:18080',origin=base,evoPort=Nu
 const testIp='10.91.'+Math.floor(Math.random()*250)+'.'+Math.floor(Math.random()*250);
 async function request(path,{method='GET',data,cookie,headers={}}={}){const r=await fetch(base+path,{method,headers:{Origin:origin,'Content-Type':'application/json','X-Forwarded-For':testIp,...(cookie?{Cookie:cookie}:{}),...headers},body:data?JSON.stringify(data):undefined});return {status:r.status,data:await r.json(),cookie:r.headers.get('set-cookie')?.split(';')[0]}}
 async function signup(){const r=await request('/api/auth/register',{method:'POST',data:{email:'wa-'+crypto.randomUUID()+'@example.com',name:'Profissional WhatsApp',password:'senha-teste-segura123'}});const o=await request('/api/offices',{method:'POST',data:{office:'Fisio teste',name:'Ana Teste',profession:'Fisioterapia'},cookie:r.cookie});return {cookie:r.cookie,id:o.data.office.id}}
-function fakeEvolution(){const calls=[];const state={value:'close'};const server=http.createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{const call={method:req.method,url:req.url,apikey:req.headers.apikey,body:body?JSON.parse(body):null};calls.push(call);res.setHeader('Content-Type','application/json');if(req.headers.apikey!=='teste-evolution'){res.statusCode=401;return res.end('{}')}if(req.url==='/instance/create')return res.end(JSON.stringify({instance:{instanceName:call.body.instanceName}}));if(req.url.startsWith('/webhook/set/')){if(state.webhookStatus){res.statusCode=state.webhookStatus;return res.end('{}')}return res.end('{}')}if(req.url.startsWith('/instance/connectionState/'))return res.end(JSON.stringify({instance:{state:state.value}}));if(req.url.startsWith('/instance/connect/'))return res.end(JSON.stringify({base64:'data:image/png;base64,iVBORw0KGgo=',code:'x'}));if(req.url.startsWith('/instance/logout/')){if(state.logoutStatus){res.statusCode=state.logoutStatus;return res.end('{}')}state.value='close';return res.end('{}')}res.statusCode=404;res.end('{}')})});return new Promise(ok=>server.listen(evoPort,'127.0.0.1',()=>ok({server,calls,state})))}
+function fakeEvolution(){const calls=[];const state={value:'close'};const server=http.createServer((req,res)=>{let body='';req.on('data',c=>body+=c);req.on('end',()=>{const call={method:req.method,url:req.url,apikey:req.headers.apikey,body:body?JSON.parse(body):null};calls.push(call);res.setHeader('Content-Type','application/json');if(req.headers.apikey!=='teste-evolution'){res.statusCode=401;return res.end('{}')}if(req.url==='/instance/create')return res.end(JSON.stringify({instance:{instanceName:call.body.instanceName}}));if(req.url.startsWith('/webhook/set/')){if(state.webhookStatus){res.statusCode=state.webhookStatus;return res.end('{}')}return res.end('{}')}if(req.url.startsWith('/instance/connectionState/'))return res.end(JSON.stringify({instance:{state:state.value}}));if(req.url.startsWith('/instance/connect/'))return res.end(JSON.stringify({base64:'data:image/png;base64,iVBORw0KGgo=',code:'x'}));if(req.url.startsWith('/message/sendText/'))return res.end(JSON.stringify({key:{id:'BOT-'+calls.length,fromMe:true}}));if(req.url.startsWith('/instance/logout/')){if(state.logoutStatus){res.statusCode=state.logoutStatus;return res.end('{}')}state.value='close';return res.end('{}')}res.statusCode=404;res.end('{}')})});return new Promise(ok=>server.listen(evoPort,'127.0.0.1',()=>ok({server,calls,state})))}
 let accounts;const twoAccounts=()=>accounts||=Promise.all([signup(),signup()]);
 const upsert=(id,extra={})=>({event:'messages.upsert',data:{key:{remoteJid:'5567999990000@s.whatsapp.net',fromMe:false,id},pushName:'Maria Paciente',message:{conversation:'Olá, quero marcar uma sessão'},...extra}});
 
@@ -39,3 +39,37 @@ for(let i=0;i<3;i++)assert.equal((await request('/api/offices/'+a.id+'/whatsapp'
 const age=(await pool.query('SELECT extract(epoch FROM now()-updated_at) AS s FROM manu_whatsapp WHERE office_id=$1',[a.id])).rows[0].s;assert(Number(age)>=85,'as atualizações da tela não podem renovar o prazo');
 await pool.query("UPDATE manu_whatsapp SET updated_at=now()-interval '3 minutes' WHERE office_id=$1",[a.id]);
 assert.equal((await request('/api/offices/'+a.id+'/whatsapp',{cookie:a.cookie})).data.status,'disconnected','depois do prazo o código vencido some')});
+
+test('WhatsApp: menu automático agenda, lista, cancela e passa para o profissional',async t=>{const c=await signup();if(!(await request('/api/offices/'+c.id+'/whatsapp',{cookie:c.cookie})).data.configured)return t.skip('Inicie o servidor com EVOLUTION_URL=http://127.0.0.1:'+evoPort+' EVOLUTION_APIKEY=teste-evolution');const evo=await fakeEvolution();t.after(()=>evo.server.close());
+assert.equal((await request('/api/offices/'+c.id+'/whatsapp/settings',{method:'POST',data:{bot:true},cookie:c.cookie})).status,409,'sem conectar não liga');
+await request('/api/offices/'+c.id+'/whatsapp/connect',{method:'POST',data:{},cookie:c.cookie});const path=new URL(evo.calls.find(x=>x.url==='/webhook/set/manu-'+c.id).body.webhook.url).pathname;await request(path,{method:'POST',data:{event:'connection.update',data:{state:'open'}}});evo.state.value='open';
+const sends=()=>evo.calls.filter(x=>x.url==='/message/sendText/manu-'+c.id);let seq=0;
+async function say(text,phone='5567988880001',extra={}){const before=sends().length;await request(path,{method:'POST',data:{event:'messages.upsert',data:{key:{remoteJid:phone+'@s.whatsapp.net',fromMe:false,id:'IN-'+(++seq)},pushName:'Paciente',message:text===null?{audioMessage:{seconds:3}}:{conversation:text},...extra}}});for(let i=0;i<40;i++){if(sends().length>before)break;await new Promise(r=>setTimeout(r,50))}const got=sends().slice(before);return got.length?got.at(-1).body.text:null}
+async function quiet(text,phone){const r=await say(text,phone);assert.equal(r,null,'não deveria responder a "'+text+'"')}
+await quiet('oi');
+assert.equal((await request('/api/offices/'+c.id+'/whatsapp/settings',{method:'POST',data:{bot:true},cookie:c.cookie})).data.bot,true);
+assert.match(await say(null),/Ainda não consigo ouvir áudios[\s\S]*1 - Agendar consulta/);
+assert.match(await say('oi'),/1 - Agendar consulta\n2 - Ver ou cancelar meu horário\n3 - Falar com Ana Teste/);
+assert.equal(sends().at(-1).body.number,'5567988880001');
+assert.match(await say('1'),/Escolha o dia:\n\n1 - (Seg|Ter|Qua|Qui|Sex) \d\d\/\d\d/,'um serviço só: vai direto para os dias úteis');
+const times=await say('1');assert.match(times,/Horários livres em .*:\n\n1 - \d\d:\d\d/);const firstTime=times.match(/1 - (\d\d:\d\d)/)[1];
+assert.match(await say('99'),/Responda com o número do horário/);
+assert.equal(await say('1'),'Qual o nome completo do paciente?');
+assert.match(await say('Maria da Silva'),/Paciente: Maria da Silva\n\n1 - Confirmar/);
+assert.match(await say('1'),/✅ Agendado!/);
+let state=(await request('/api/offices/'+c.id+'/state',{cookie:c.cookie})).data.data;const booked=state.appointments.find(a=>a.source==='whatsapp');assert(booked,'consulta criada na agenda');assert.equal(booked.status,'Agendada');assert.equal(booked.time,firstTime);assert.equal(state.patients.find(p=>p.id===booked.patient).name,'Maria da Silva');
+assert.match(await say('menu'),/1 - Agendar consulta/);assert.match(await say('1'),/Escolha o dia/);
+const again=await say('1');assert(!again.split('\n').includes('1 - '+firstTime)&&!new RegExp('\\d+ - '+firstTime+'$','m').test(again),'horário já ocupado não aparece de novo');
+assert.match(await say('menu'),/1 - Agendar/);
+assert.match(await say('2'),/Suas próximas consultas:\n\n1 - .* às .* · Consulta/);
+assert.match(await say('1'),/Cancelar a consulta de .*\n\n1 - Sim, cancelar/);
+assert.match(await say('1'),/Consulta cancelada/);
+state=(await request('/api/offices/'+c.id+'/state',{cookie:c.cookie})).data.data;assert.equal(state.appointments.find(a=>a.id===booked.id).status,'Cancelada');
+const lastBot=sends().at(-1).body.text;await request(path,{method:'POST',data:{event:'messages.upsert',data:{key:{remoteJid:'5567988880001@s.whatsapp.net',fromMe:true,id:'BOT-ECHO'},message:{conversation:lastBot}}}});
+assert.match(await say('oi'),/1 - Agendar/,'eco da própria mensagem do robô não pausa o atendimento');
+assert.match(await say('3'),/Ana Teste vai responder por aqui/);await quiet('oi');
+assert.match(await say('oi','5567977770002'),/1 - Agendar/,'outro paciente continua sendo atendido');
+await request(path,{method:'POST',data:{event:'messages.upsert',data:{key:{remoteJid:'5567977770002@s.whatsapp.net',fromMe:true,id:'HUMANO-1'},message:{conversation:'Oi, aqui é a Ana, já te respondo!'}}}});
+await quiet('oi','5567977770002');
+const info=(await request('/api/offices/'+c.id+'/whatsapp',{cookie:c.cookie})).data;assert.equal(info.bot,true);assert.equal(info.conversations.length,2);
+assert.equal((await request('/api/offices/'+c.id+'/whatsapp/settings',{method:'POST',data:{bot:false},cookie:c.cookie})).data.bot,false);await quiet('oi','5567966660003')});
