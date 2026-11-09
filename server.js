@@ -98,7 +98,7 @@ if(step==='cancel'){if(n===1){const a=await botCancel(officeId,msg.phone,data.id
 return menu()}
 app.post('/api/offices/:id/whatsapp/settings',session,owner,async(req,res)=>{if(typeof req.body?.bot!=='boolean')return res.status(400).json({error:'Configuração inválida.'});const r=await pool.query('UPDATE manu_whatsapp SET bot=$2 WHERE office_id=$1 RETURNING bot',[req.params.id,req.body.bot]);if(!r.rowCount)return res.status(409).json({error:'Conecte o WhatsApp antes de ligar o atendimento automático.'});res.json({bot:r.rows[0].bot})});
 app.get('/healthz',async(req,res)=>{await pool.query('SELECT 1');res.type('text').send('ok\n')});
-app.use(express.static(new URL('./public/',import.meta.url).pathname,{etag:true,maxAge:0}));
+app.use('/images',express.static(new URL('./public/images/',import.meta.url).pathname,{etag:true,maxAge:'7d'}));app.use(express.static(new URL('./public/',import.meta.url).pathname,{etag:true,maxAge:0}));
 app.use('/api',(req,res)=>res.status(404).json({error:'Recurso não encontrado.'}));
 app.use((err,req,res,next)=>{const status=err.type==='entity.too.large'?413:err instanceof SyntaxError?400:503;res.status(status).json({error:status===413?'Dados muito grandes. Reduza as imagens.':status===400?'Solicitação inválida.':'Não foi possível acessar o serviço. Tente novamente em instantes.'})});
 if(process.env.NODE_ENV!=='unit-test'){try{await db();app.listen(port,'0.0.0.0',()=>console.log('Manu Saúde disponível na porta '+port));}catch(e){console.error('Não foi possível iniciar o banco. Confira PGHOST, PGPORT, PGDATABASE, PGUSER e PGPASSWORD no ambiente.');process.exit(1)}}
