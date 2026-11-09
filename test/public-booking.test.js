@@ -6,7 +6,7 @@ import http from 'node:http';
 async function req(path,method='GET',data,cookie){return new Promise((resolve,reject)=>{const payload=data?JSON.stringify(data):undefined;const r=http.request(base+path,{method,localAddress:'127.0.0.2',headers:{Origin:base,'Content-Type':'application/json',...(payload?{'Content-Length':Buffer.byteLength(payload)}:{}),...(cookie?{Cookie:cookie}:{})}},res=>{let text='';res.on('data',chunk=>text+=chunk);res.on('end',()=>{try{resolve({status:res.statusCode,data:JSON.parse(text),cookie:res.headers['set-cookie']?.[0]?.split(';')[0]})}catch(e){reject(e)}})});r.on('error',reject);r.end(payload)})}
 
 test('Public bookings reserve atomically, retry safely, protect private data and respect availability',async()=>{
- const account=await req('/api/auth/register','POST',{email:crypto.randomUUID()+'@example.com',name:'Ana',password:'SenhaTeste12345'}),cookie=account.cookie;
+ const account=await req('/api/auth/register','POST',{acceptTerms:true,email:crypto.randomUUID()+'@example.com',name:'Ana',password:'SenhaTeste12345'}),cookie=account.cookie;
  let office=(await req('/api/offices','POST',{office:'Ana',name:'Ana',profession:'Psicologia',published:'yes',mode:'Presencial'},cookie)).data.office;
  const path='/api/offices/'+office.id,publicPath='/api/public/offices/'+office.id;
  let state=(await req(path+'/state','GET',null,cookie)).data;

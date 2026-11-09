@@ -36,3 +36,6 @@ body.profile-workspace .publication-switch{margin:0 0 0 auto;flex-shrink:0;curso
 .wa-bot input{width:18px;height:18px}
 .wa-pause{display:block;margin:12px 0 4px;font-size:.9rem}
 .wa-pause select{margin-left:6px;padding:4px 8px;border-radius:8px}
+.terms-notice{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px;padding:14px 18px;border:1px solid #f3c98b;border-radius:14px;background:#fff4e5;color:#5c3d0e;font-size:.9rem;line-height:1.6}
+.terms-notice span{flex:1 1 260px}.terms-notice a{color:inherit;font-weight:700}
+.terms-notice button{margin-left:auto}
