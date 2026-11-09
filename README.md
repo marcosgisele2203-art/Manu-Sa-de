@@ -43,9 +43,9 @@ Após criar uma conta, `/boas-vindas.html` orienta a configuração inicial: ár
 
 ## Perfil e privacidade
 
-Meu perfil abre em Informações, com dados pessoais e profissionais. CPF, nascimento, gênero e imagem de assinatura ficam na tabela privada `manu_private_profiles`, acessível apenas pela própria conta; não são retornados pela API pública do consultório. O salvamento dos dados pessoais e profissionais ocorre na mesma transação, com verificação de versões.
+Meu perfil abre em Informações, com nome, fuso horário e dados profissionais. **CPF, data de nascimento, gênero e imagem de assinatura não são coletados** (LGPD: a plataforma só guarda o que usa). Ao iniciar, o servidor apaga esses dados de cadastros antigos na tabela `manu_private_profiles`, que permanece vazia por compatibilidade. O salvamento do perfil continua verificando versões.
 
-O menu do perfil inclui informações, sobre mim, contato e endereço, procedimentos, horários, página pública e segurança da conta. As telas de assinatura profissional e de limite de agendamentos ficam fora do menu. A imagem de assinatura é apenas um cadastro privado: não certifica nem assina documentos. A troca de senha exige a senha atual e encerra as outras sessões. Limites diários configurados também são verificados no backend.
+O menu do perfil inclui informações, sobre mim, contato e endereço, procedimentos, horários, página pública e segurança da conta; o limite de agendamentos fica em Opções avançadas. A troca de senha exige a senha atual e encerra as outras sessões. Limites diários configurados também são verificados no backend.
 
 ## Atendimento simultâneo
 
