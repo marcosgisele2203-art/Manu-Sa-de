@@ -43,11 +43,11 @@ Em Meu WhatsApp, o profissional liga **Atendimento automático por menu**. Quem 
 
 1. **Agendar consulta**: escolhe o serviço (pulado se houver só um), o dia (próximos dias com vaga), o horário, a modalidade (se o consultório atende presencial e online) e informa o nome se ainda não for paciente. A consulta entra na agenda como **Agendada**, com a etiqueta "Agendado pelo WhatsApp".
 2. **Ver ou cancelar meu horário**: lista as próximas consultas do número (o paciente é reconhecido pelo telefone, com ou sem 55 e nono dígito) e permite cancelar.
-3. **Falar com o profissional**: pausa o atendimento automático por 12 horas para essa pessoa.
+3. **Falar com o profissional**: pausa o atendimento automático para essa pessoa pelo tempo escolhido (30 minutos, 2 horas ou 12 horas; padrão 2 horas).
 
 Os horários usam as mesmas regras da agenda e da página pública: dias e horários de atendimento, capacidade, limite diário e fuso do consultório. A marcação é conferida de novo dentro de uma transação, então dois pacientes não ficam com a última vaga.
 
-Se o profissional responder um paciente pelo próprio celular, o atendimento automático pausa por 12 horas com aquela pessoa. Uma conversa parada por 30 minutos recomeça do menu. Áudios e imagens ainda não são entendidos: o paciente recebe o menu. O estado de cada conversa fica em `manu_whatsapp_sessions`.
+Se o profissional responder um paciente pelo próprio celular, o atendimento automático pausa com aquela pessoa pelo mesmo tempo escolhido em Meu WhatsApp. Desligar e ligar de novo o atendimento automático desfaz todas as pausas. Uma conversa parada por 30 minutos recomeça do menu. Áudios e imagens ainda não são entendidos: o paciente recebe o menu. O estado de cada conversa fica em `manu_whatsapp_sessions`.
 
 ## Desenvolvimento e testes
 
