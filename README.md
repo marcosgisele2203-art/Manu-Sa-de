@@ -40,6 +40,14 @@ O cadastro exige marcar "Li e aceito". A versão aceita (`TERMS_VERSION` em `ser
 
 Os textos foram escritos a partir do funcionamento real da plataforma, mas **não substituem a revisão de um advogado**.
 
+## Recuperar senha
+
+Em `/conta.html`, **Esqueci minha senha** pede o e-mail. O sistema manda um **código de 6 números** para o **WhatsApp do consultório** (campo WhatsApp do perfil), a partir do **número da plataforma**:
+
+- `EVOLUTION_INSTANCE`: nome da instância da Evolution usada para avisos da plataforma (por exemplo `Manu - Saude`). Precisa estar conectada.
+
+O código vale **15 minutos**, aceita **5 tentativas**, só pode ser usado uma vez e não é reenviado antes de 60 segundos. A resposta da tela é sempre a mesma, exista o e-mail ou não. Ao criar a senha nova, **todas as sessões abertas são encerradas** e o profissional já entra logado. Os códigos ficam só como hash em `manu_password_resets`. Sem `EVOLUTION_INSTANCE`, nada é enviado e o log registra o motivo. A tela indica o `LEGAL_EMAIL` para suporte.
+
 ## WhatsApp do consultório
 
 Cada profissional conecta o **próprio número** em Meu WhatsApp, lendo um código QR com o celular. A conexão usa uma **Evolution API** (pode ser a mesma do Easypanel): o Manu Saúde cria uma instância `manu-<id do consultório>` para cada consultório e configura o webhook sozinho.
@@ -69,7 +77,7 @@ Se o profissional responder um paciente pelo próprio celular, o atendimento aut
 ```sh
 npm ci
 # Defina as variáveis PG* para um PostgreSQL local de testes.
-PORT=18080 NODE_ENV=test EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution npm start
+PORT=18080 NODE_ENV=test EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution EVOLUTION_INSTANCE=plataforma npm start
 # Em outro terminal:
 npm test
 ```

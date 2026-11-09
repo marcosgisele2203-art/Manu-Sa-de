@@ -25,7 +25,7 @@ Node 22, ES modules (`"type": "module"`). Dependências: só `express` e `pg`.
 npm ci
 # terminal 1: servidor apontando para um Postgres DESCARTÁVEL
 PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=manutest PORT=18080 NODE_ENV=test \
-  EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution npm start
+  EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution EVOLUTION_INSTANCE=plataforma npm start
 # terminal 2:
 npm test        # testes de integração em http://127.0.0.1:18080 (ou TEST_URL)
 ```
