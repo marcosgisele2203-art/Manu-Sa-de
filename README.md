@@ -25,6 +25,21 @@ Após implantar, acesse `/conta.html` e crie uma conta para testar. Cadastre o c
 
 `/painel.html?consultorio=exemplo-ana` continua sendo um exemplo fictício, com dados locais. Consultórios de contas reais usam o backend e não gravam pacientes no localStorage.
 
+## Termos de uso e Política de privacidade
+
+As páginas `/termos` e `/privacidade` são geradas a partir de `legal/termos.html` e `legal/privacidade.html`. Os dados do responsável pela plataforma vêm do ambiente:
+
+- `LEGAL_NAME`: nome ou razão social do responsável (ex.: `Manu Digital Ltda.`).
+- `LEGAL_DOC`: CNPJ ou CPF (opcional, mas recomendado), ex.: `CNPJ 00.000.000/0001-00`.
+- `LEGAL_EMAIL`: e-mail para pedidos de privacidade e exclusão de conta.
+- `LEGAL_CITY`: cidade do foro (ex.: `Miranda/MS`).
+
+Sem essas variáveis, as páginas mostram **"a informar"** no lugar.
+
+O cadastro exige marcar "Li e aceito". A versão aceita (`TERMS_VERSION` em `server.js`) e a data ficam em `manu_users`. Contas antigas, ou contas que aceitaram uma versão anterior, veem uma faixa no painel para aceitar. **Ao mudar o texto de forma importante, altere `TERMS_VERSION`**: todos precisarão aceitar de novo. No primeiro contato pelo menu do WhatsApp, o paciente recebe o link da política de privacidade (quando `APP_URL` está definido).
+
+Os textos foram escritos a partir do funcionamento real da plataforma, mas **não substituem a revisão de um advogado**.
+
 ## WhatsApp do consultório
 
 Cada profissional conecta o **próprio número** em Meu WhatsApp, lendo um código QR com o celular. A conexão usa uma **Evolution API** (pode ser a mesma do Easypanel): o Manu Saúde cria uma instância `manu-<id do consultório>` para cada consultório e configura o webhook sozinho.
