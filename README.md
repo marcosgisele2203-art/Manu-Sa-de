@@ -6,7 +6,7 @@ Plataforma de consultórios online com Node.js 22, Express e PostgreSQL 17.
 
 Cadastro e login com senhas protegidas por scrypt, sessões em cookie HttpOnly, acesso privado por proprietário, página pública do consultório, perfil com logo/foto, pacientes, agenda diária, calendário mensal compacto e catálogo de serviços. A gravação no banco verifica a versão dos dados para evitar sobrescrever alterações simultâneas e respeita a capacidade simultânea e rejeita novas consultas fora dos horários de atendimento.
 
-A recuperação de senha por e-mail, verificação de e-mail, assinaturas, cobrança, reserva pública automática e automação de WhatsApp ainda não estão habilitadas. O botão de WhatsApp abre uma mensagem para envio manual.
+A recuperação de senha por e-mail, verificação de e-mail, assinaturas, cobrança, reserva pública automática e respostas automáticas pelo WhatsApp ainda não estão habilitadas. O profissional já pode conectar o próprio WhatsApp e receber as mensagens dos pacientes no painel (veja "WhatsApp do consultório"). O botão de WhatsApp de cada consulta abre uma mensagem para envio manual.
 
 ## EasyPanel
 
@@ -25,17 +25,31 @@ Após implantar, acesse `/conta.html` e crie uma conta para testar. Cadastre o c
 
 `/painel.html?consultorio=exemplo-ana` continua sendo um exemplo fictício, com dados locais. Consultórios de contas reais usam o backend e não gravam pacientes no localStorage.
 
+## WhatsApp do consultório
+
+Cada profissional conecta o **próprio número** em Meu WhatsApp, lendo um código QR com o celular. A conexão usa uma **Evolution API** (pode ser a mesma do Easypanel): o Manu Saúde cria uma instância `manu-<id do consultório>` para cada consultório e configura o webhook sozinho.
+
+No serviço da aplicação, configure:
+
+- `EVOLUTION_URL`: endereço da Evolution API, sem barra no final.
+- `EVOLUTION_APIKEY`: a chave global da Evolution (`AUTHENTICATION_API_KEY` dela). Não envie ao GitHub.
+- `APP_URL`: endereço HTTPS público do Manu Saúde, sem barra final. A Evolution usa esse endereço para entregar as mensagens.
+
+O webhook fica em `/webhook/whatsapp/<consultório>/<segredo>`; o segredo é gerado a cada conexão e só o hash fica no banco. Mensagens de grupos são ignoradas. As mensagens (texto e o tipo de mídia: áudio, imagem, documento) ficam na tabela `manu_whatsapp_messages` e aparecem só para o dono do consultório. São dados de saúde: mantenha backups protegidos.
+
+Por enquanto o sistema **só recebe** as mensagens; as respostas continuam no celular do profissional.
+
 ## Desenvolvimento e testes
 
 ```sh
 npm ci
 # Defina as variáveis PG* para um PostgreSQL local de testes.
-PORT=18080 NODE_ENV=test npm start
+PORT=18080 NODE_ENV=test EVOLUTION_URL=http://127.0.0.1:18091 EVOLUTION_APIKEY=teste-evolution npm start
 # Em outro terminal:
 npm test
 ```
 
-`npm test` roda testes de integração contra `http://127.0.0.1:18080`. Use exclusivamente banco descartável: os testes criam contas e consultórios fictícios. Para outro endereço, configure `TEST_URL`.
+`npm test` roda testes de integração contra `http://127.0.0.1:18080`. Use exclusivamente banco descartável: os testes criam contas e consultórios fictícios. Para outro endereço, configure `TEST_URL`. O teste do WhatsApp sobe uma Evolution falsa na porta 18091; se o servidor for iniciado sem `EVOLUTION_URL`, essa parte é pulada.
 
 ## Primeiro acesso
 
