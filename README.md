@@ -39,17 +39,17 @@ npm test
 
 ## Primeiro acesso
 
-Após criar uma conta, `/boas-vindas.html` orienta a configuração inicial: área de atuação, nome, telefone, horários e fuso. O consultório e a agenda são criados na mesma transação. Contas com consultório cadastrado entram diretamente no painel. Os primeiros passos acompanham os cadastros e podem ser recolhidos. A página pública continua separada da administração, e suas cores são escolhidas em Aparência da página.
+Após criar uma conta, `/boas-vindas.html` orienta a configuração inicial: área de atuação, nome, telefone, horários e fuso (Brasília, Campo Grande/Cuiabá, Manaus, Rio Branco ou Noronha). O consultório e a agenda são criados na mesma transação. Contas com consultório cadastrado entram diretamente no painel. Os primeiros passos acompanham os cadastros e podem ser recolhidos. A página pública continua separada da administração, e suas cores são escolhidas em Aparência da página.
 
 ## Perfil e privacidade
 
 Meu perfil abre em Informações, com dados pessoais e profissionais. CPF, nascimento, gênero e imagem de assinatura ficam na tabela privada `manu_private_profiles`, acessível apenas pela própria conta; não são retornados pela API pública do consultório. O salvamento dos dados pessoais e profissionais ocorre na mesma transação, com verificação de versões.
 
-O menu do perfil inclui informações, assinatura profissional, sobre mim, contato e endereço, procedimentos, horários, limite de agendamentos, página pública e segurança da conta. A imagem de assinatura é apenas um cadastro privado: não certifica nem assina documentos. A troca de senha exige a senha atual e encerra as outras sessões. Limites diários configurados também são verificados no backend.
+O menu do perfil inclui informações, sobre mim, contato e endereço, procedimentos, horários, página pública e segurança da conta. As telas de assinatura profissional e de limite de agendamentos ficam fora do menu. A imagem de assinatura é apenas um cadastro privado: não certifica nem assina documentos. A troca de senha exige a senha atual e encerra as outras sessões. Limites diários configurados também são verificados no backend.
 
 ## Atendimento simultâneo
 
-Em Meu perfil → Limite de Agendamentos, o profissional pode herdar a capacidade padrão do consultório, escolher de 1 a 20 pacientes simultâneos ou permitir sobreposição sem limite fixo mediante confirmação explícita. A capacidade padrão permanece em 1 para agendas existentes. O limite diário continua sendo uma configuração separada. O backend calcula a concorrência real por intervalo, considera o fim de uma consulta disponível para a próxima e exige confirmação em sobreposições sem limite.
+Em Meu consultório → Opções avançadas: grupos e limites (fechado por padrão), o profissional pode escolher de 1 a 20 pacientes simultâneos ou 0 para permitir sobreposição sem limite fixo, mediante confirmação explícita. A capacidade padrão permanece em 1 para agendas existentes. O limite diário continua sendo uma configuração separada. O backend calcula a concorrência real por intervalo, considera o fim de uma consulta disponível para a próxima e exige confirmação em sobreposições sem limite.
 
 ## Publicação da página profissional
 
