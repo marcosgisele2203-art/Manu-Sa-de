@@ -40,6 +40,15 @@ O cadastro exige marcar "Li e aceito". A versão aceita (`TERMS_VERSION` em `ser
 
 Os textos foram escritos a partir do funcionamento real da plataforma, mas **não substituem a revisão de um advogado**.
 
+## Lembrete na véspera da consulta
+
+A cada 10 minutos, o servidor procura consultas **Agendadas** ou **Confirmadas** do dia seguinte, no fuso do consultório, e manda um lembrete ao paciente pelo **WhatsApp conectado do consultório**.
+
+- Só manda das **9h às 20h**, uma única vez por consulta (tabela `manu_reminders`), no máximo 40 mensagens por consultório a cada rodada, com 3 segundos entre elas para não parecer envio em massa. Se o envio falhar, tenta de novo na rodada seguinte. Quem tem mais de uma consulta no mesmo telefone recebe uma mensagem só, com "1 - Confirmar todas / 2 - Cancelar todas / 3 - Ver o menu".
+- Com o atendimento automático ligado, o lembrete de uma consulta **Agendada** pede: **1** para confirmar (a consulta vira "Confirmada") ou **2** para cancelar (o profissional recebe o aviso de cancelamento). Funciona por até 36 horas, e qualquer outra resposta segue para o menu normal.
+- Pedidos "Aguardando" (feitos pela página e ainda não confirmados pelo profissional) não recebem lembrete.
+- O profissional liga e desliga em **Meu WhatsApp → Lembrete na véspera da consulta**. Vem ligado.
+
 ## Aviso de agendamento para o profissional
 
 Quando um paciente marca pela página do consultório ou pelo menu do WhatsApp, o **número da plataforma** (`EVOLUTION_INSTANCE`) manda uma mensagem para o WhatsApp do consultório com nome, telefone, serviço, dia e horário. Quando o paciente cancela pelo menu, chega um aviso de cancelamento. As mensagens começam com `Manu Saúde:`. Por isso o menu automático do consultório não responde a elas, e o mesmo vale para o código de recuperar senha. Sem `EVOLUTION_INSTANCE` ou sem WhatsApp no cadastro do consultório, nada é enviado.
