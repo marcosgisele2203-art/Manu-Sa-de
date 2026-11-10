@@ -40,6 +40,10 @@ O cadastro exige marcar "Li e aceito". A versão aceita (`TERMS_VERSION` em `ser
 
 Os textos foram escritos a partir do funcionamento real da plataforma, mas **não substituem a revisão de um advogado**.
 
+## Aviso de agendamento para o profissional
+
+Quando um paciente marca pela página do consultório ou pelo menu do WhatsApp, o **número da plataforma** (`EVOLUTION_INSTANCE`) manda uma mensagem para o WhatsApp do consultório com nome, telefone, serviço, dia e horário. Quando o paciente cancela pelo menu, chega um aviso de cancelamento. As mensagens começam com `Manu Saúde:`. Por isso o menu automático do consultório não responde a elas, e o mesmo vale para o código de recuperar senha. Sem `EVOLUTION_INSTANCE` ou sem WhatsApp no cadastro do consultório, nada é enviado.
+
 ## Recuperar senha
 
 Em `/conta.html`, **Esqueci minha senha** pede o e-mail. O sistema manda um **código de 6 números** para o **WhatsApp do consultório** (campo WhatsApp do perfil), a partir do **número da plataforma**:
