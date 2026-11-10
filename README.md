@@ -44,7 +44,7 @@ Os textos foram escritos a partir do funcionamento real da plataforma, mas **nã
 
 A cada 10 minutos, o servidor procura consultas **Agendadas** ou **Confirmadas** do dia seguinte, no fuso do consultório, e manda um lembrete ao paciente pelo **WhatsApp conectado do consultório**.
 
-- Só manda das **9h às 20h**, uma única vez por consulta (tabela `manu_reminders`), com 3 segundos entre uma mensagem e outra para não parecer envio em massa.
+- Só manda das **9h às 20h**, uma única vez por consulta (tabela `manu_reminders`), no máximo 40 mensagens por consultório a cada rodada, com 3 segundos entre elas para não parecer envio em massa. Se o envio falhar, tenta de novo na rodada seguinte. Quem tem mais de uma consulta no mesmo telefone recebe uma mensagem só, com "1 - Confirmar todas / 2 - Cancelar todas / 3 - Ver o menu".
 - Com o atendimento automático ligado, o lembrete de uma consulta **Agendada** pede: **1** para confirmar (a consulta vira "Confirmada") ou **2** para cancelar (o profissional recebe o aviso de cancelamento). Funciona por até 36 horas, e qualquer outra resposta segue para o menu normal.
 - Pedidos "Aguardando" (feitos pela página e ainda não confirmados pelo profissional) não recebem lembrete.
 - O profissional liga e desliga em **Meu WhatsApp → Lembrete na véspera da consulta**. Vem ligado.
