@@ -1,0 +1,50 @@
+# Roda os testes a cada Pull Request e a cada envio para a main.
+# Usa um Postgres descartável criado só para o teste (nunca o banco de produção).
+name: Testes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: manutest
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: manutest
+      PORT: 18080
+      NODE_ENV: test
+      EVOLUTION_URL: http://127.0.0.1:18091
+      EVOLUTION_APIKEY: teste-evolution
+      EVOLUTION_INSTANCE: plataforma
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --check server.js
+      - name: Ligar o servidor
+        run: |
+          node server.js > servidor.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18080/healthz && exit 0; sleep 1; done
+          cat servidor.log; exit 1
+      - run: npm test
+      - name: Log do servidor (se falhar)
+        if: failure()
+        run: cat servidor.log
