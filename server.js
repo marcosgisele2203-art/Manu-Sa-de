@@ -1,129 +1,1989 @@
 import express from 'express';
 import pg from 'pg';
-import {randomBytes,randomInt,randomUUID,scrypt as scryptCb,timingSafeEqual,createHash} from 'node:crypto';
-import {promisify} from 'node:util';import fs from 'node:fs';
-const scrypt=promisify(scryptCb),app=express(),pool=new pg.Pool({max:10,connectionTimeoutMillis:5000});
-const production=process.env.NODE_ENV==='production',port=Number(process.env.PORT||8080);
-const hash=s=>createHash('sha256').update(s).digest('hex');
-app.set('trust proxy',1);app.disable('x-powered-by');
-app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin','X-Frame-Options':'SAMEORIGIN'});if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');next()});
-app.use('/api',(req,res,next)=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)){const expected=process.env.APP_URL||`${req.protocol}://${req.get('host')}`;if(req.get('origin')!==new URL(expected).origin)return res.status(403).json({error:'Origem da solicitação inválida. Recarregue a página.'})}next()});
-app.use(express.json({limit:'3mb'}));
-const db=async()=>{const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(728192)');await c.query(`CREATE TABLE IF NOT EXISTS manu_users(id uuid PRIMARY KEY,email text UNIQUE NOT NULL,name text NOT NULL,password text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_sessions(token text PRIMARY KEY,user_id uuid NOT NULL REFERENCES manu_users(id) ON DELETE CASCADE,expires_at timestamptz NOT NULL);CREATE TABLE IF NOT EXISTS manu_offices(id uuid PRIMARY KEY,owner_id uuid NOT NULL REFERENCES manu_users(id) ON DELETE CASCADE,profile jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_states(office_id uuid PRIMARY KEY REFERENCES manu_offices(id) ON DELETE CASCADE,data jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_public_bookings(request_id uuid PRIMARY KEY,office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,signature text NOT NULL,receipt jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_private_profiles(user_id uuid PRIMARY KEY REFERENCES manu_users(id) ON DELETE CASCADE,data jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_auth_attempts(key text PRIMARY KEY,count integer NOT NULL,expires_at timestamptz NOT NULL);CREATE INDEX IF NOT EXISTS manu_offices_owner ON manu_offices(owner_id);ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS session_id uuid DEFAULT gen_random_uuid();ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS user_agent text NOT NULL DEFAULT '';ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz;ALTER TABLE manu_sessions ALTER COLUMN created_at SET DEFAULT now();CREATE UNIQUE INDEX IF NOT EXISTS manu_sessions_public_id ON manu_sessions(session_id);CREATE INDEX IF NOT EXISTS manu_sessions_expiry ON manu_sessions(expires_at);CREATE TABLE IF NOT EXISTS manu_password_resets(user_id uuid PRIMARY KEY REFERENCES manu_users(id) ON DELETE CASCADE,code_hash text NOT NULL,expires_at timestamptz NOT NULL,attempts integer NOT NULL DEFAULT 0,created_at timestamptz NOT NULL DEFAULT now());ALTER TABLE manu_users ADD COLUMN IF NOT EXISTS terms_version text;ALTER TABLE manu_users ADD COLUMN IF NOT EXISTS terms_accepted_at timestamptz;UPDATE manu_private_profiles SET data='{}'::jsonb WHERE data<>'{}'::jsonb;CREATE TABLE IF NOT EXISTS manu_whatsapp(office_id uuid PRIMARY KEY REFERENCES manu_offices(id) ON DELETE CASCADE,instance text UNIQUE NOT NULL,secret text NOT NULL,status text NOT NULL DEFAULT 'disconnected',phone text NOT NULL DEFAULT '',updated_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_whatsapp_messages(id bigserial PRIMARY KEY,office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,message_id text NOT NULL,phone text NOT NULL,name text NOT NULL DEFAULT '',direction text NOT NULL,kind text NOT NULL,text text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now(),UNIQUE(office_id,message_id));CREATE INDEX IF NOT EXISTS manu_whatsapp_messages_conversa ON manu_whatsapp_messages(office_id,phone,created_at);ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS secret_next text;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS bot boolean NOT NULL DEFAULT false;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS pause_minutes integer NOT NULL DEFAULT 120;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS reminders boolean NOT NULL DEFAULT true;CREATE TABLE IF NOT EXISTS manu_reminders(office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,appointment_id text NOT NULL,phone_key text NOT NULL DEFAULT '',awaiting boolean NOT NULL DEFAULT false,sent_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(office_id,appointment_id));CREATE INDEX IF NOT EXISTS manu_reminders_phone ON manu_reminders(office_id,phone_key) WHERE awaiting;CREATE TABLE IF NOT EXISTS manu_whatsapp_sessions(office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,phone text NOT NULL,step text NOT NULL DEFAULT 'start',data jsonb NOT NULL DEFAULT '{}',paused_until timestamptz,updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(office_id,phone));`);await c.query('COMMIT')}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}};
-function cookie(req){const value=req.headers.cookie?.split(';').map(s=>s.trim()).find(s=>s.startsWith('manu_session='))?.slice(13);return value&&/^[a-f0-9]{64}$/.test(value)?value:null}
-async function session(req,res,next){const token=cookie(req);if(!token)return res.status(401).json({error:'Entre na sua conta para continuar.'});const r=await pool.query('SELECT u.id,u.email,u.name,u.terms_version FROM manu_sessions s JOIN manu_users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at>now()',[hash(token)]);if(!r.rowCount)return res.status(401).json({error:'Sua sessão expirou. Entre novamente.'});req.user=r.rows[0];next()}
-async function createSession(res,user,req){const token=randomBytes(32).toString('hex');await pool.query('INSERT INTO manu_sessions(token,user_id,expires_at,user_agent) VALUES($1,$2,now()+interval \'7 days\',$3)',[hash(token),user.id,String(req?.get('user-agent')||'').slice(0,500)]);res.cookie('manu_session',token,{httpOnly:true,secure:production,sameSite:'lax',maxAge:7*86400000,path:'/'});}
-async function throttle(req,res,next){const keys=['ip:'+req.ip,'email:'+String(req.body?.email||req.user?.id||'').trim().toLowerCase()];for(const k of keys){const r=await pool.query(`INSERT INTO manu_auth_attempts(key,count,expires_at) VALUES($1,1,now()+interval '15 minutes') ON CONFLICT(key) DO UPDATE SET count=CASE WHEN manu_auth_attempts.expires_at<now() THEN 1 ELSE manu_auth_attempts.count+1 END,expires_at=CASE WHEN manu_auth_attempts.expires_at<now() THEN now()+interval '15 minutes' ELSE manu_auth_attempts.expires_at END RETURNING count`,[hash(k)]);if(r.rows[0].count>20){res.set('Retry-After','900');return res.status(429).json({error:'Muitas tentativas. Aguarde 15 minutos e tente novamente.'})}}next()}
-const emailOf=b=>String(b.email||'').trim().toLowerCase();
-app.post('/api/auth/register',throttle,async(req,res)=>{const email=emailOf(req.body),name=String(req.body.name||'').trim(),password=req.body.password;if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>150||!name||name.length>100||typeof password!=='string'||password.length<10||password.length>128)return res.status(400).json({error:'Informe nome, e-mail válido e senha de 10 a 128 caracteres.'});if(req.body.acceptTerms!==true&&req.body.acceptTerms!=='on')return res.status(400).json({error:'Para criar a conta, leia e aceite os Termos de uso e a Política de privacidade.'});const salt=randomBytes(16).toString('hex'),key=await scrypt(password,salt,64),user={id:randomUUID(),name,email};try{await pool.query('INSERT INTO manu_users(id,email,name,password,terms_version,terms_accepted_at) VALUES($1,$2,$3,$4,$5,now())',[user.id,email,name,salt+':'+key.toString('hex'),TERMS_VERSION])}catch(e){if(e.code==='23505')return res.status(409).json({error:'Não foi possível cadastrar esse e-mail. Se já possui conta, tente entrar.'});throw e}await createSession(res,user,req);res.status(201).json({user})});
-app.post('/api/auth/login',throttle,async(req,res)=>{const email=emailOf(req.body),password=req.body.password;if(typeof password!=='string'||password.length>128)return res.status(400).json({error:'Informe e-mail e senha.'});const r=await pool.query('SELECT * FROM manu_users WHERE email=$1',[email]),u=r.rows[0];const [salt,stored]=(u?.password||'00000000000000000000000000000000:'+Buffer.alloc(64).toString('hex')).split(':');const derived=await scrypt(password,salt,64);if(!u||!timingSafeEqual(derived,Buffer.from(stored,'hex')))return res.status(401).json({error:'E-mail ou senha incorretos.'});const user={id:u.id,name:u.name,email:u.email};await createSession(res,user,req);res.json({user})});
-app.get('/api/auth/me',session,(req,res)=>{const {terms_version,...user}=req.user;res.json({user:{...user,termsAccepted:terms_version===TERMS_VERSION}})});app.post('/api/auth/accept-terms',session,async(req,res)=>{if(req.body?.accept!==true)return res.status(400).json({error:'Marque que leu e aceita os termos.'});await pool.query('UPDATE manu_users SET terms_version=$2,terms_accepted_at=now() WHERE id=$1',[req.user.id,TERMS_VERSION]);res.json({ok:true,termsVersion:TERMS_VERSION})});
-app.post('/api/auth/logout',async(req,res)=>{const token=cookie(req);if(token)await pool.query('DELETE FROM manu_sessions WHERE token=$1',[hash(token)]);res.clearCookie('manu_session',{path:'/',httpOnly:true,secure:production,sameSite:'lax'});res.json({ok:true})});
-app.get('/api/auth/sessions',session,async(req,res)=>{const r=await pool.query('SELECT session_id,token,user_agent,created_at,expires_at FROM manu_sessions WHERE user_id=$1 AND expires_at>now() ORDER BY created_at DESC NULLS LAST',[req.user.id]);const current=hash(cookie(req));res.json({sessions:r.rows.map(s=>{const ua=s.user_agent||'',browser=ua.includes('Edg/')?'Microsoft Edge':ua.includes('Firefox/')?'Firefox':ua.includes('Chrome/')?'Chrome':ua.includes('Safari/')?'Safari':'Navegador não informado',device=/Android|iPhone|iPad/i.test(ua)?'Celular / tablet':'Computador';return {id:s.session_id,label:ua?device+' · '+browser:'Sessão anterior',createdAt:s.created_at,expiresAt:s.expires_at,current:s.token===current}})})});
-app.delete('/api/auth/sessions/others',session,async(req,res)=>{const r=await pool.query('DELETE FROM manu_sessions WHERE user_id=$1 AND token<>$2',[req.user.id,hash(cookie(req))]);res.json({revoked:r.rowCount})});
-app.delete('/api/auth/sessions/:id',session,async(req,res)=>{if(!uuid(req.params.id))return res.status(404).json({error:'Sessão não encontrada.'});const r=await pool.query('DELETE FROM manu_sessions WHERE user_id=$1 AND session_id=$2 AND token<>$3 RETURNING session_id',[req.user.id,req.params.id,hash(cookie(req))]);if(!r.rowCount)return res.status(404).json({error:'Sessão não encontrada ou é a sessão atual. Use Sair para encerrar o acesso atual.'});res.json({ok:true})});
-const uuid=s=>typeof s==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(s);
-async function owner(req,res,next){if(!uuid(req.params.id))return res.status(404).json({error:'Consultório não encontrado.'});const r=await pool.query('SELECT * FROM manu_offices WHERE id=$1 AND owner_id=$2',[req.params.id,req.user.id]);if(!r.rowCount)return res.status(404).json({error:'Consultório não encontrado.'});req.office=r.rows[0];next()}
-const profileFields=['office','name','profession','specialty','registration','specialtyRegistration','bio','education','experience','services','mode','hours','insurance','payment','whatsapp','phone','email','address','city','state','accessibility','website','logo','photo','primaryColor','backgroundColor','textColor','timezone','appearanceConfigured','honorific','council','registrationNumber','registrationState','profileCompleted','showEmail','showPhone','showAddress','published','onlineBooking'];
-function profileInput(input){const p={};for(const k of profileFields){if(typeof input[k]!=='string')p[k]='';else p[k]=input[k].trim();if(p[k].length>(['logo','photo'].includes(k)?750000:2000))throw Error('validation');}for(const [k,v] of Object.entries({primaryColor:'#189caf',backgroundColor:'#fcfcfc',textColor:'#293e38'})){p[k]=p[k]||v;if(!/^#[0-9a-f]{6}$/i.test(p[k]))throw Error('validation')}for(const [k,v] of Object.entries({showEmail:'no',showPhone:'no',showAddress:'yes',published:'yes',onlineBooking:'yes'})){p[k]=p[k]||v;if(!['yes','no'].includes(p[k]))throw Error('validation')}const areas=input.practiceAreas||[];if(!Array.isArray(areas)||areas.length>20||areas.some(a=>typeof a!=='string'||a.length>100))throw Error('validation');p.practiceAreas=areas.map(a=>a.trim()).filter(Boolean);p.timezone=p.timezone||'America/Sao_Paulo';if(!['America/Sao_Paulo','America/Campo_Grande','America/Manaus','America/Rio_Branco','America/Noronha'].includes(p.timezone))throw Error('validation');if(!p.office||!p.name||!p.profession)throw Error('validation');for(const k of ['logo','photo'])if(p[k]&&!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(p[k]))throw Error('validation');if(p.website&&!/^https?:\/\//i.test(p.website))throw Error('validation');return p}
-app.post('/api/onboarding',session,async(req,res)=>{const {profession,office,phone,start,end,timezone='America/Sao_Paulo'}=req.body;const validTime=s=>typeof s==='string'&&/^([01]\d|2[0-3]):[0-5]\d$/.test(s);if(typeof profession!=='string'||!profession.trim()||typeof office!=='string'||!office.trim()||office.length>100||typeof phone!=='string'||!/^\+?[\d\s()\-]{10,25}$/.test(phone)||phone.replace(/\D/g,'').length<10||!validTime(start)||!validTime(end)||start>=end||!['America/Sao_Paulo','America/Campo_Grande','America/Manaus','America/Rio_Branco','America/Noronha'].includes(timezone))return res.status(400).json({error:'Revise a área de atuação, o nome, o telefone e os horários do consultório.'});const c=await pool.connect();try{await c.query('BEGIN');await c.query('SELECT id FROM manu_users WHERE id=$1 FOR UPDATE',[req.user.id]);const existing=await c.query('SELECT id FROM manu_offices WHERE owner_id=$1 ORDER BY id LIMIT 1',[req.user.id]);if(existing.rowCount){await c.query('COMMIT');return res.json({id:existing.rows[0].id})}const id=randomUUID(),profile=profileInput({published:'no',office:office.trim(),name:req.user.name,profession:profession.trim(),whatsapp:phone.trim(),phone:phone.trim(),hours:`Segunda a sexta, das ${start} às ${end}`,mode:'Presencial',timezone});const state=defaultState();state.settings.start=start;state.settings.end=end;await c.query('INSERT INTO manu_offices(id,owner_id,profile) VALUES($1,$2,$3)',[id,req.user.id,profile]);await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2)',[id,state]);await c.query('COMMIT');res.status(201).json({id})}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}});
-app.get('/api/offices',session,async(req,res)=>{const r=await pool.query('SELECT id,profile,version FROM manu_offices WHERE owner_id=$1 ORDER BY id',[req.user.id]);res.json({offices:r.rows.map(r=>({...r.profile,id:r.id,_version:r.version}))})});
-app.post('/api/offices',session,async(req,res)=>{let p;try{p=profileInput({...req.body,published:req.body.published||'no'})}catch{return res.status(400).json({error:'Revise os dados do consultório e use imagens PNG, JPG ou WebP de até 500 KB.'})}const id=randomUUID();await pool.query('INSERT INTO manu_offices(id,owner_id,profile) VALUES($1,$2,$3)',[id,req.user.id,p]);res.status(201).json({office:{...p,id,_version:1}})});
-app.put('/api/offices/:id',session,owner,async(req,res)=>{let p;try{p=profileInput(req.body)}catch{return res.status(400).json({error:'Revise os dados e as imagens do consultório.'})}const r=await pool.query('UPDATE manu_offices SET profile=$1,version=version+1 WHERE id=$2 AND owner_id=$3 AND version=$4 RETURNING version',[p,req.params.id,req.user.id,req.body._version]);if(!r.rowCount)return res.status(409).json({error:'Este cadastro foi alterado em outra aba. Recarregue antes de editar novamente.'});res.json({office:{...p,id:req.params.id,_version:r.rows[0].version}})});
-app.get('/api/account/profile',session,async(req,res)=>{await pool.query('INSERT INTO manu_private_profiles(user_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.user.id,{}]);const r=await pool.query('SELECT data,version FROM manu_private_profiles WHERE user_id=$1',[req.user.id]);res.json(r.rows[0])});
+import { randomBytes, randomInt, randomUUID, scrypt as scryptCb, timingSafeEqual, createHash } from 'node:crypto';
+import { promisify } from 'node:util';
+import fs from 'node:fs';
+const scrypt = promisify(scryptCb),
+  app = express(),
+  pool = new pg.Pool({ max: 10, connectionTimeoutMillis: 5000 });
+const production = process.env.NODE_ENV === 'production',
+  port = Number(process.env.PORT || 8080);
+const hash = (s) => createHash('sha256').update(s).digest('hex');
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'X-Frame-Options': 'SAMEORIGIN',
+  });
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+  next();
+});
+app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const expected = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+    if (req.get('origin') !== new URL(expected).origin)
+      return res.status(403).json({ error: 'Origem da solicitação inválida. Recarregue a página.' });
+  }
+  next();
+});
+app.use(express.json({ limit: '3mb' }));
+const db = async () => {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(728192)');
+    await c.query(
+      `CREATE TABLE IF NOT EXISTS manu_users(id uuid PRIMARY KEY,email text UNIQUE NOT NULL,name text NOT NULL,password text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_sessions(token text PRIMARY KEY,user_id uuid NOT NULL REFERENCES manu_users(id) ON DELETE CASCADE,expires_at timestamptz NOT NULL);CREATE TABLE IF NOT EXISTS manu_offices(id uuid PRIMARY KEY,owner_id uuid NOT NULL REFERENCES manu_users(id) ON DELETE CASCADE,profile jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_states(office_id uuid PRIMARY KEY REFERENCES manu_offices(id) ON DELETE CASCADE,data jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_public_bookings(request_id uuid PRIMARY KEY,office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,signature text NOT NULL,receipt jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_private_profiles(user_id uuid PRIMARY KEY REFERENCES manu_users(id) ON DELETE CASCADE,data jsonb NOT NULL,version integer NOT NULL DEFAULT 1);CREATE TABLE IF NOT EXISTS manu_auth_attempts(key text PRIMARY KEY,count integer NOT NULL,expires_at timestamptz NOT NULL);CREATE INDEX IF NOT EXISTS manu_offices_owner ON manu_offices(owner_id);ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS session_id uuid DEFAULT gen_random_uuid();ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS user_agent text NOT NULL DEFAULT '';ALTER TABLE manu_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz;ALTER TABLE manu_sessions ALTER COLUMN created_at SET DEFAULT now();CREATE UNIQUE INDEX IF NOT EXISTS manu_sessions_public_id ON manu_sessions(session_id);CREATE INDEX IF NOT EXISTS manu_sessions_expiry ON manu_sessions(expires_at);CREATE TABLE IF NOT EXISTS manu_password_resets(user_id uuid PRIMARY KEY REFERENCES manu_users(id) ON DELETE CASCADE,code_hash text NOT NULL,expires_at timestamptz NOT NULL,attempts integer NOT NULL DEFAULT 0,created_at timestamptz NOT NULL DEFAULT now());ALTER TABLE manu_users ADD COLUMN IF NOT EXISTS terms_version text;ALTER TABLE manu_users ADD COLUMN IF NOT EXISTS terms_accepted_at timestamptz;UPDATE manu_private_profiles SET data='{}'::jsonb WHERE data<>'{}'::jsonb;CREATE TABLE IF NOT EXISTS manu_whatsapp(office_id uuid PRIMARY KEY REFERENCES manu_offices(id) ON DELETE CASCADE,instance text UNIQUE NOT NULL,secret text NOT NULL,status text NOT NULL DEFAULT 'disconnected',phone text NOT NULL DEFAULT '',updated_at timestamptz NOT NULL DEFAULT now());CREATE TABLE IF NOT EXISTS manu_whatsapp_messages(id bigserial PRIMARY KEY,office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,message_id text NOT NULL,phone text NOT NULL,name text NOT NULL DEFAULT '',direction text NOT NULL,kind text NOT NULL,text text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now(),UNIQUE(office_id,message_id));CREATE INDEX IF NOT EXISTS manu_whatsapp_messages_conversa ON manu_whatsapp_messages(office_id,phone,created_at);ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS secret_next text;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS bot boolean NOT NULL DEFAULT false;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS pause_minutes integer NOT NULL DEFAULT 120;ALTER TABLE manu_whatsapp ADD COLUMN IF NOT EXISTS reminders boolean NOT NULL DEFAULT true;CREATE TABLE IF NOT EXISTS manu_reminders(office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,appointment_id text NOT NULL,phone_key text NOT NULL DEFAULT '',awaiting boolean NOT NULL DEFAULT false,sent_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(office_id,appointment_id));CREATE INDEX IF NOT EXISTS manu_reminders_phone ON manu_reminders(office_id,phone_key) WHERE awaiting;CREATE TABLE IF NOT EXISTS manu_whatsapp_sessions(office_id uuid NOT NULL REFERENCES manu_offices(id) ON DELETE CASCADE,phone text NOT NULL,step text NOT NULL DEFAULT 'start',data jsonb NOT NULL DEFAULT '{}',paused_until timestamptz,updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(office_id,phone));`,
+    );
+    await c.query('COMMIT');
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+};
+function cookie(req) {
+  const value = req.headers.cookie
+    ?.split(';')
+    .map((s) => s.trim())
+    .find((s) => s.startsWith('manu_session='))
+    ?.slice(13);
+  return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+async function session(req, res, next) {
+  const token = cookie(req);
+  if (!token) return res.status(401).json({ error: 'Entre na sua conta para continuar.' });
+  const r = await pool.query(
+    'SELECT u.id,u.email,u.name,u.terms_version FROM manu_sessions s JOIN manu_users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at>now()',
+    [hash(token)],
+  );
+  if (!r.rowCount) return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' });
+  req.user = r.rows[0];
+  next();
+}
+async function createSession(res, user, req) {
+  const token = randomBytes(32).toString('hex');
+  await pool.query(
+    "INSERT INTO manu_sessions(token,user_id,expires_at,user_agent) VALUES($1,$2,now()+interval '7 days',$3)",
+    [hash(token), user.id, String(req?.get('user-agent') || '').slice(0, 500)],
+  );
+  res.cookie('manu_session', token, {
+    httpOnly: true,
+    secure: production,
+    sameSite: 'lax',
+    maxAge: 7 * 86400000,
+    path: '/',
+  });
+}
+async function throttle(req, res, next) {
+  const keys = [
+    'ip:' + req.ip,
+    'email:' +
+      String(req.body?.email || req.user?.id || '')
+        .trim()
+        .toLowerCase(),
+  ];
+  for (const k of keys) {
+    const r = await pool.query(
+      `INSERT INTO manu_auth_attempts(key,count,expires_at) VALUES($1,1,now()+interval '15 minutes') ON CONFLICT(key) DO UPDATE SET count=CASE WHEN manu_auth_attempts.expires_at<now() THEN 1 ELSE manu_auth_attempts.count+1 END,expires_at=CASE WHEN manu_auth_attempts.expires_at<now() THEN now()+interval '15 minutes' ELSE manu_auth_attempts.expires_at END RETURNING count`,
+      [hash(k)],
+    );
+    if (r.rows[0].count > 20) {
+      res.set('Retry-After', '900');
+      return res.status(429).json({ error: 'Muitas tentativas. Aguarde 15 minutos e tente novamente.' });
+    }
+  }
+  next();
+}
+const emailOf = (b) =>
+  String(b.email || '')
+    .trim()
+    .toLowerCase();
+app.post('/api/auth/register', throttle, async (req, res) => {
+  const email = emailOf(req.body),
+    name = String(req.body.name || '').trim(),
+    password = req.body.password;
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    email.length > 150 ||
+    !name ||
+    name.length > 100 ||
+    typeof password !== 'string' ||
+    password.length < 10 ||
+    password.length > 128
+  )
+    return res.status(400).json({ error: 'Informe nome, e-mail válido e senha de 10 a 128 caracteres.' });
+  if (req.body.acceptTerms !== true && req.body.acceptTerms !== 'on')
+    return res
+      .status(400)
+      .json({ error: 'Para criar a conta, leia e aceite os Termos de uso e a Política de privacidade.' });
+  const salt = randomBytes(16).toString('hex'),
+    key = await scrypt(password, salt, 64),
+    user = { id: randomUUID(), name, email };
+  try {
+    await pool.query(
+      'INSERT INTO manu_users(id,email,name,password,terms_version,terms_accepted_at) VALUES($1,$2,$3,$4,$5,now())',
+      [user.id, email, name, salt + ':' + key.toString('hex'), TERMS_VERSION],
+    );
+  } catch (e) {
+    if (e.code === '23505')
+      return res
+        .status(409)
+        .json({ error: 'Não foi possível cadastrar esse e-mail. Se já possui conta, tente entrar.' });
+    throw e;
+  }
+  await createSession(res, user, req);
+  res.status(201).json({ user });
+});
+app.post('/api/auth/login', throttle, async (req, res) => {
+  const email = emailOf(req.body),
+    password = req.body.password;
+  if (typeof password !== 'string' || password.length > 128)
+    return res.status(400).json({ error: 'Informe e-mail e senha.' });
+  const r = await pool.query('SELECT * FROM manu_users WHERE email=$1', [email]),
+    u = r.rows[0];
+  const [salt, stored] = (u?.password || '00000000000000000000000000000000:' + Buffer.alloc(64).toString('hex')).split(
+    ':',
+  );
+  const derived = await scrypt(password, salt, 64);
+  if (!u || !timingSafeEqual(derived, Buffer.from(stored, 'hex')))
+    return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
+  const user = { id: u.id, name: u.name, email: u.email };
+  await createSession(res, user, req);
+  res.json({ user });
+});
+app.get('/api/auth/me', session, (req, res) => {
+  const { terms_version, ...user } = req.user;
+  res.json({ user: { ...user, termsAccepted: terms_version === TERMS_VERSION } });
+});
+app.post('/api/auth/accept-terms', session, async (req, res) => {
+  if (req.body?.accept !== true) return res.status(400).json({ error: 'Marque que leu e aceita os termos.' });
+  await pool.query('UPDATE manu_users SET terms_version=$2,terms_accepted_at=now() WHERE id=$1', [
+    req.user.id,
+    TERMS_VERSION,
+  ]);
+  res.json({ ok: true, termsVersion: TERMS_VERSION });
+});
+app.post('/api/auth/logout', async (req, res) => {
+  const token = cookie(req);
+  if (token) await pool.query('DELETE FROM manu_sessions WHERE token=$1', [hash(token)]);
+  res.clearCookie('manu_session', { path: '/', httpOnly: true, secure: production, sameSite: 'lax' });
+  res.json({ ok: true });
+});
+app.get('/api/auth/sessions', session, async (req, res) => {
+  const r = await pool.query(
+    'SELECT session_id,token,user_agent,created_at,expires_at FROM manu_sessions WHERE user_id=$1 AND expires_at>now() ORDER BY created_at DESC NULLS LAST',
+    [req.user.id],
+  );
+  const current = hash(cookie(req));
+  res.json({
+    sessions: r.rows.map((s) => {
+      const ua = s.user_agent || '',
+        browser = ua.includes('Edg/')
+          ? 'Microsoft Edge'
+          : ua.includes('Firefox/')
+            ? 'Firefox'
+            : ua.includes('Chrome/')
+              ? 'Chrome'
+              : ua.includes('Safari/')
+                ? 'Safari'
+                : 'Navegador não informado',
+        device = /Android|iPhone|iPad/i.test(ua) ? 'Celular / tablet' : 'Computador';
+      return {
+        id: s.session_id,
+        label: ua ? device + ' · ' + browser : 'Sessão anterior',
+        createdAt: s.created_at,
+        expiresAt: s.expires_at,
+        current: s.token === current,
+      };
+    }),
+  });
+});
+app.delete('/api/auth/sessions/others', session, async (req, res) => {
+  const r = await pool.query('DELETE FROM manu_sessions WHERE user_id=$1 AND token<>$2', [
+    req.user.id,
+    hash(cookie(req)),
+  ]);
+  res.json({ revoked: r.rowCount });
+});
+app.delete('/api/auth/sessions/:id', session, async (req, res) => {
+  if (!uuid(req.params.id)) return res.status(404).json({ error: 'Sessão não encontrada.' });
+  const r = await pool.query(
+    'DELETE FROM manu_sessions WHERE user_id=$1 AND session_id=$2 AND token<>$3 RETURNING session_id',
+    [req.user.id, req.params.id, hash(cookie(req))],
+  );
+  if (!r.rowCount)
+    return res
+      .status(404)
+      .json({ error: 'Sessão não encontrada ou é a sessão atual. Use Sair para encerrar o acesso atual.' });
+  res.json({ ok: true });
+});
+const uuid = (s) => typeof s === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(s);
+async function owner(req, res, next) {
+  if (!uuid(req.params.id)) return res.status(404).json({ error: 'Consultório não encontrado.' });
+  const r = await pool.query('SELECT * FROM manu_offices WHERE id=$1 AND owner_id=$2', [req.params.id, req.user.id]);
+  if (!r.rowCount) return res.status(404).json({ error: 'Consultório não encontrado.' });
+  req.office = r.rows[0];
+  next();
+}
+const profileFields = [
+  'office',
+  'name',
+  'profession',
+  'specialty',
+  'registration',
+  'specialtyRegistration',
+  'bio',
+  'education',
+  'experience',
+  'services',
+  'mode',
+  'hours',
+  'insurance',
+  'payment',
+  'whatsapp',
+  'phone',
+  'email',
+  'address',
+  'city',
+  'state',
+  'accessibility',
+  'website',
+  'logo',
+  'photo',
+  'primaryColor',
+  'backgroundColor',
+  'textColor',
+  'timezone',
+  'appearanceConfigured',
+  'honorific',
+  'council',
+  'registrationNumber',
+  'registrationState',
+  'profileCompleted',
+  'showEmail',
+  'showPhone',
+  'showAddress',
+  'published',
+  'onlineBooking',
+];
+function profileInput(input) {
+  const p = {};
+  for (const k of profileFields) {
+    if (typeof input[k] !== 'string') p[k] = '';
+    else p[k] = input[k].trim();
+    if (p[k].length > (['logo', 'photo'].includes(k) ? 750000 : 2000)) throw Error('validation');
+  }
+  for (const [k, v] of Object.entries({ primaryColor: '#189caf', backgroundColor: '#fcfcfc', textColor: '#293e38' })) {
+    p[k] = p[k] || v;
+    if (!/^#[0-9a-f]{6}$/i.test(p[k])) throw Error('validation');
+  }
+  for (const [k, v] of Object.entries({
+    showEmail: 'no',
+    showPhone: 'no',
+    showAddress: 'yes',
+    published: 'yes',
+    onlineBooking: 'yes',
+  })) {
+    p[k] = p[k] || v;
+    if (!['yes', 'no'].includes(p[k])) throw Error('validation');
+  }
+  const areas = input.practiceAreas || [];
+  if (!Array.isArray(areas) || areas.length > 20 || areas.some((a) => typeof a !== 'string' || a.length > 100))
+    throw Error('validation');
+  p.practiceAreas = areas.map((a) => a.trim()).filter(Boolean);
+  p.timezone = p.timezone || 'America/Sao_Paulo';
+  if (
+    !['America/Sao_Paulo', 'America/Campo_Grande', 'America/Manaus', 'America/Rio_Branco', 'America/Noronha'].includes(
+      p.timezone,
+    )
+  )
+    throw Error('validation');
+  if (!p.office || !p.name || !p.profession) throw Error('validation');
+  for (const k of ['logo', 'photo'])
+    if (p[k] && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(p[k])) throw Error('validation');
+  if (p.website && !/^https?:\/\//i.test(p.website)) throw Error('validation');
+  return p;
+}
+app.post('/api/onboarding', session, async (req, res) => {
+  const { profession, office, phone, start, end, timezone = 'America/Sao_Paulo' } = req.body;
+  const validTime = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
+  if (
+    typeof profession !== 'string' ||
+    !profession.trim() ||
+    typeof office !== 'string' ||
+    !office.trim() ||
+    office.length > 100 ||
+    typeof phone !== 'string' ||
+    !/^\+?[\d\s()\-]{10,25}$/.test(phone) ||
+    phone.replace(/\D/g, '').length < 10 ||
+    !validTime(start) ||
+    !validTime(end) ||
+    start >= end ||
+    !['America/Sao_Paulo', 'America/Campo_Grande', 'America/Manaus', 'America/Rio_Branco', 'America/Noronha'].includes(
+      timezone,
+    )
+  )
+    return res
+      .status(400)
+      .json({ error: 'Revise a área de atuação, o nome, o telefone e os horários do consultório.' });
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT id FROM manu_users WHERE id=$1 FOR UPDATE', [req.user.id]);
+    const existing = await c.query('SELECT id FROM manu_offices WHERE owner_id=$1 ORDER BY id LIMIT 1', [req.user.id]);
+    if (existing.rowCount) {
+      await c.query('COMMIT');
+      return res.json({ id: existing.rows[0].id });
+    }
+    const id = randomUUID(),
+      profile = profileInput({
+        published: 'no',
+        office: office.trim(),
+        name: req.user.name,
+        profession: profession.trim(),
+        whatsapp: phone.trim(),
+        phone: phone.trim(),
+        hours: `Segunda a sexta, das ${start} às ${end}`,
+        mode: 'Presencial',
+        timezone,
+      });
+    const state = defaultState();
+    state.settings.start = start;
+    state.settings.end = end;
+    await c.query('INSERT INTO manu_offices(id,owner_id,profile) VALUES($1,$2,$3)', [id, req.user.id, profile]);
+    await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2)', [id, state]);
+    await c.query('COMMIT');
+    res.status(201).json({ id });
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+app.get('/api/offices', session, async (req, res) => {
+  const r = await pool.query('SELECT id,profile,version FROM manu_offices WHERE owner_id=$1 ORDER BY id', [
+    req.user.id,
+  ]);
+  res.json({ offices: r.rows.map((r) => ({ ...r.profile, id: r.id, _version: r.version })) });
+});
+app.post('/api/offices', session, async (req, res) => {
+  let p;
+  try {
+    p = profileInput({ ...req.body, published: req.body.published || 'no' });
+  } catch {
+    return res
+      .status(400)
+      .json({ error: 'Revise os dados do consultório e use imagens PNG, JPG ou WebP de até 500 KB.' });
+  }
+  const id = randomUUID();
+  await pool.query('INSERT INTO manu_offices(id,owner_id,profile) VALUES($1,$2,$3)', [id, req.user.id, p]);
+  res.status(201).json({ office: { ...p, id, _version: 1 } });
+});
+app.put('/api/offices/:id', session, owner, async (req, res) => {
+  let p;
+  try {
+    p = profileInput(req.body);
+  } catch {
+    return res.status(400).json({ error: 'Revise os dados e as imagens do consultório.' });
+  }
+  const r = await pool.query(
+    'UPDATE manu_offices SET profile=$1,version=version+1 WHERE id=$2 AND owner_id=$3 AND version=$4 RETURNING version',
+    [p, req.params.id, req.user.id, req.body._version],
+  );
+  if (!r.rowCount)
+    return res
+      .status(409)
+      .json({ error: 'Este cadastro foi alterado em outra aba. Recarregue antes de editar novamente.' });
+  res.json({ office: { ...p, id: req.params.id, _version: r.rows[0].version } });
+});
+app.get('/api/account/profile', session, async (req, res) => {
+  await pool.query('INSERT INTO manu_private_profiles(user_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING', [
+    req.user.id,
+    {},
+  ]);
+  const r = await pool.query('SELECT data,version FROM manu_private_profiles WHERE user_id=$1', [req.user.id]);
+  res.json(r.rows[0]);
+});
 // CPF, nascimento, gênero e assinatura deixaram de ser coletados (LGPD: só guardar o que é usado). O campo continua no formato antigo para não quebrar abas abertas.
-export function privateInput(){return {}}
-app.put('/api/offices/:id/professional',session,owner,async(req,res)=>{let profile,personal;try{profile=profileInput(req.body.profile);personal=privateInput(req.body.personal)}catch{return res.status(400).json({error:'Revise os dados do perfil e as imagens.'})}const c=await pool.connect();try{await c.query('BEGIN');const a=await c.query('UPDATE manu_offices SET profile=$1,version=version+1 WHERE id=$2 AND owner_id=$3 AND version=$4 RETURNING version',[profile,req.params.id,req.user.id,req.body.profileVersion]);const b=await c.query('UPDATE manu_private_profiles SET data=$1,version=version+1 WHERE user_id=$2 AND version=$3 RETURNING version',[personal,req.user.id,req.body.personalVersion]);if(!a.rowCount||!b.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'O perfil foi alterado em outra aba. Recarregue antes de salvar novamente.'})}await c.query('COMMIT');res.json({office:{...profile,id:req.params.id,_version:a.rows[0].version},personal:{data:personal,version:b.rows[0].version}})}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}});
-app.post('/api/auth/change-password',session,throttle,async(req,res)=>{const {currentPassword,newPassword}=req.body;if(typeof currentPassword!=='string'||currentPassword.length>128||typeof newPassword!=='string'||newPassword.length<10||newPassword.length>128)return res.status(400).json({error:'Informe a senha atual e uma nova senha de 10 a 128 caracteres.'});const c=await pool.connect();try{await c.query('BEGIN');const r=await c.query('SELECT password FROM manu_users WHERE id=$1 FOR UPDATE',[req.user.id]);const [salt,stored]=r.rows[0].password.split(':'),key=await scrypt(currentPassword,salt,64);if(!timingSafeEqual(key,Buffer.from(stored,'hex'))){await c.query('ROLLBACK');return res.status(400).json({error:'A senha atual não confere.'})}const nextSalt=randomBytes(16).toString('hex'),next=await scrypt(newPassword,nextSalt,64);await c.query('UPDATE manu_users SET password=$1 WHERE id=$2',[nextSalt+':'+next.toString('hex'),req.user.id]);await c.query('DELETE FROM manu_sessions WHERE user_id=$1 AND token<>$2',[req.user.id,hash(cookie(req))]);await c.query('COMMIT');res.json({ok:true})}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}});
-export function publicProfile(input){const p={...input};p.showEmail=p.showEmail||'no';p.showPhone=p.showPhone||'no';p.showAddress=p.showAddress||'yes';if(p.showEmail!=='yes')p.email='';if(p.showPhone!=='yes')p.phone='';if(p.showAddress!=='yes')for(const key of ['address','city','state','accessibility'])p[key]='';return p}
-async function publicOfficeData(id,source){const data=await pool.query('SELECT data FROM manu_states WHERE office_id=$1',[id]);const profile=publicProfile(source),cfg=data.rows[0]?.data?.settings;if(cfg){profile.hours=Array.from({length:7},(_,day)=>{const periods=effectivePeriods(cfg,day);return periods.length?['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'][day]+': '+periods.map(p=>p.start+' às '+p.end).join(' e '):''}).filter(Boolean).join('\n');const available=cfg.services.filter(s=>cfg.procedureMode!=='custom'||(cfg.procedureIds||[]).includes(s.id));profile.bookingServices=available.map(({id,name,duration,price})=>({id,name,duration,price}));profile.services=available.map(s=>s.name+' · '+s.duration+' minutos · '+Number(s.price).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})).join('\n')}return {...profile,id}}
-app.get('/api/offices/:id/preview',session,owner,async(req,res)=>res.json({office:await publicOfficeData(req.params.id,req.office.profile)}));
-app.get('/api/public/offices/:id',async(req,res)=>{if(!uuid(req.params.id))return res.status(404).json({error:'Página indisponível.'});const r=await pool.query('SELECT profile FROM manu_offices WHERE id=$1',[req.params.id]);if(!r.rowCount||r.rows[0].profile.published==='no')return res.status(404).json({error:'Página indisponível.'});res.json({office:await publicOfficeData(req.params.id,r.rows[0].profile)})});
-const defaultState=()=>({patients:[],appointments:[],settings:{days:[1,2,3,4,5],start:'09:00',end:'18:00',services:[{id:'consulta',name:'Consulta',duration:30,price:0}]}});
-app.get('/api/offices/:id/state',session,owner,async(req,res)=>{await pool.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.params.id,defaultState()]);const r=await pool.query('SELECT data,version FROM manu_states WHERE office_id=$1',[req.params.id]);res.json(r.rows[0])});
-export function simultaneousCapacity(cfg){return cfg.capacityMode==='ask'?0:cfg.capacityMode==='fixed'?cfg.simultaneousLimit:(cfg.clinicSimultaneousLimit??1)}
-export function peakConcurrency(intervals){const events=intervals.flatMap(([start,end])=>[[start,1],[end,-1]]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);let current=0,max=0;for(const [,delta] of events){current+=delta;max=Math.max(max,current)}return max}
-export function effectivePeriods(settings,day){return settings.scheduleMode==='custom'?(settings.weeklySchedule?.[String(day)]||[]):settings.days.includes(day)?[{start:settings.start,end:settings.end}]:[]}
-function validateWeekly(cfg){if(cfg.scheduleMode!==undefined&&!['clinic','custom'].includes(cfg.scheduleMode))throw Error('validation');if(cfg.weeklySchedule===undefined){if(cfg.scheduleMode==='custom')throw Error('validation');return}if(!cfg.weeklySchedule||typeof cfg.weeklySchedule!=='object'||Array.isArray(cfg.weeklySchedule)||Object.keys(cfg.weeklySchedule).some(k=>!/^[0-6]$/.test(k)))throw Error('validation');let total=0;for(let day=0;day<7;day++){const periods=cfg.weeklySchedule[day]||[];if(!Array.isArray(periods)||periods.length>4)throw Error('validation');for(const p of periods)if(!p||!/^([01]\d|2[0-3]):[0-5]\d$/.test(p.start)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(p.end)||p.start>=p.end)throw Error('validation');const sorted=[...periods].sort((a,b)=>a.start.localeCompare(b.start));for(let i=1;i<sorted.length;i++)if(sorted[i].start<sorted[i-1].end)throw Error('validation');total+=periods.length}if(cfg.scheduleMode==='custom'&&!total)throw Error('validation')}
-export function validateState(s){const fail=()=>{throw Error('validation')};if(!s||!Array.isArray(s.patients)||!Array.isArray(s.appointments)||s.patients.length>10000||s.appointments.length>20000||!s.settings)fail();const time=t=>typeof t==='string'&&/^([01]\d|2[0-3]):[0-5]\d$/.test(t);const str=(t,n)=>typeof t==='string'&&t.length<=n;const ids=new Set();for(const p of s.patients){if(!str(p.id,100)||!p.id||ids.has(p.id)||!str(p.name,100)||!p.name.trim()||!str(p.phone||'',25)||!str(p.email||'',150))fail();ids.add(p.id)}const cfg=s.settings;validateWeekly(cfg);if(cfg.capacityMode!==undefined&&!['inherit','ask','fixed'].includes(cfg.capacityMode))fail();if(cfg.clinicSimultaneousLimit!==undefined&&(!Number.isInteger(cfg.clinicSimultaneousLimit)||cfg.clinicSimultaneousLimit<0||cfg.clinicSimultaneousLimit>20))fail();if(cfg.capacityMode==='fixed'&&(!Number.isInteger(cfg.simultaneousLimit)||cfg.simultaneousLimit<1||cfg.simultaneousLimit>20))fail();if(!Array.isArray(cfg.days)||!cfg.days.length||cfg.days.some(d=>!Number.isInteger(d)||d<0||d>6)||!time(cfg.start)||!time(cfg.end)||cfg.start>=cfg.end||!Array.isArray(cfg.services)||!cfg.services.length||cfg.services.length>100)fail();if(cfg.dailyLimit!==undefined&&(!Number.isInteger(cfg.dailyLimit)||cfg.dailyLimit<0||cfg.dailyLimit>200))fail();const services=new Set();for(const v of cfg.services){if(!str(v.id,100)||!v.id||services.has(v.id)||!str(v.name,100)||!v.name.trim()||!Number.isInteger(v.duration)||v.duration<5||v.duration>240||v.duration%5||!Number.isFinite(v.price)||v.price<0||v.price>99999)fail();services.add(v.id)}if(cfg.procedureMode!==undefined&&!['all','custom'].includes(cfg.procedureMode))fail();if(cfg.procedureIds!==undefined&&(!Array.isArray(cfg.procedureIds)||cfg.procedureIds.length>100||cfg.procedureIds.some(id=>!services.has(id))))fail();const aps=new Set(),byDate=new Map(),mins=t=>Number(t.slice(0,2))*60+Number(t.slice(3));for(const a of s.appointments){const d=new Date(a.date+'T12:00:00Z');if(!str(a.id,100)||!a.id||aps.has(a.id)||!ids.has(a.patient)||!str(a.service,100)||!str(a.serviceName,100)||!str(a.note||'',500)||!time(a.time)||!/^\d{4}-\d{2}-\d{2}$/.test(a.date)||!Number.isFinite(d.valueOf())||d.toISOString().slice(0,10)!==a.date||!Number.isInteger(a.duration)||a.duration<5||a.duration>240||!Number.isFinite(a.price)||a.price<0||!['Agendada','Confirmada','Aguardando','Concluída','Não compareceu','Cancelada'].includes(a.status)||!['Presencial','Online'].includes(a.mode))fail();aps.add(a.id);if(['Cancelada','Não compareceu'].includes(a.status))continue;const group=byDate.get(a.date)||[];group.push([mins(a.time),mins(a.time)+a.duration]);byDate.set(a.date,group)}for(const slots of byDate.values()){const cap=simultaneousCapacity(cfg);if(cap>0&&peakConcurrency(slots)>cap)throw Error('overlap')}return true}
-app.put('/api/offices/:id/state',session,owner,async(req,res)=>{try{validateState(req.body.data)}catch(e){return res.status(400).json({error:e.message==='overlap'?'O limite de agendamentos simultâneos foi atingido. Revise os horários ou a capacidade configurada.':'Dados de agendamento inválidos. Revise o cadastro.'})}const next=req.body.data;const prior=await pool.query('SELECT data,version FROM manu_states WHERE office_id=$1',[req.params.id]);if(!prior.rowCount||prior.rows[0].version!==req.body.version)return res.status(409).json({error:'A agenda foi atualizada. Recarregue a página antes de salvar.'});const cfg=next.settings;if(cfg.dailyLimit>0){const dates=new Set(next.appointments.map(a=>a.date));for(const date of dates){const active=a=>a.date===date&&!['Cancelada','Não compareceu'].includes(a.status);const newCount=next.appointments.filter(active).length,oldCount=prior.rows[0].data.appointments.filter(active).length;if(newCount>cfg.dailyLimit&&newCount>oldCount)return res.status(400).json({error:'Limite de agendamentos do dia atingido.'})}}const mins=t=>Number(t.slice(0,2))*60+Number(t.slice(3));for(const a of next.appointments){const old=prior.rows[0].data.appointments.find(v=>v.id===a.id);if(['Cancelada','Não compareceu'].includes(a.status))continue;const changed=!old||old.date!==a.date||old.time!==a.time||old.duration!==a.duration||old.service!==a.service||['Cancelada','Não compareceu'].includes(old.status);if(changed&&simultaneousCapacity(cfg)===0&&next.appointments.some(b=>b.id!==a.id&&b.date===a.date&&!['Cancelada','Não compareceu'].includes(b.status)&&mins(a.time)<mins(b.time)+b.duration&&mins(a.time)+a.duration>mins(b.time))&&req.body.overlapConfirmed!==true)return res.status(409).json({error:'Confirme a sobreposição antes de salvar este agendamento.'});if(changed&&cfg.procedureMode==='custom'&&!(cfg.procedureIds||[]).includes(a.service))return res.status(400).json({error:'Este procedimento não está habilitado para o profissional.'});if(changed&&!effectivePeriods(cfg,new Date(a.date+'T12:00:00Z').getUTCDay()).some(p=>mins(a.time)>=mins(p.start)&&mins(a.time)+a.duration<=mins(p.end)))return res.status(400).json({error:'A consulta está fora dos dias ou horários de atendimento.'})}const r=await pool.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2 AND version=$3 RETURNING version',[next,req.params.id,req.body.version]);if(!r.rowCount)return res.status(409).json({error:'A agenda mudou em outra aba ou dispositivo. Recarregue a página para ver os dados atuais antes de salvar.'});res.json({version:r.rows[0].version})});
-function officeToday(profile){return new Date().toLocaleDateString('en-CA',{timeZone:profile.timezone||'America/Sao_Paulo'})}
-function validBookingDate(date,profile){if(typeof date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(date))return false;const d=new Date(date+'T12:00:00Z'),first=officeToday(profile),last=new Date(first+'T12:00:00Z');last.setUTCDate(last.getUTCDate()+120);return Number.isFinite(d.valueOf())&&d.toISOString().slice(0,10)===date&&date>=first&&date<=last.toISOString().slice(0,10)}
-const activeBooking=a=>!['Cancelada','Não compareceu'].includes(a.status);
-export function bookingSlots(profile,state,date,serviceId){if(!validBookingDate(date,profile))return [];const cfg=state.settings,service=cfg.services.find(s=>s.id===serviceId&&(cfg.procedureMode!=='custom'||(cfg.procedureIds||[]).includes(s.id)));if(!service)return [];const mins=t=>Number(t.slice(0,2))*60+Number(t.slice(3)),rows=state.appointments.filter(a=>a.date===date&&activeBooking(a));if(cfg.dailyLimit>0&&rows.length>=cfg.dailyLimit)return [];const capacity=simultaneousCapacity(cfg)||1,periods=effectivePeriods(cfg,new Date(date+'T12:00:00Z').getUTCDay()),now=new Date(),parts=new Intl.DateTimeFormat('en-GB',{timeZone:profile.timezone||'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(now),minimum=date===officeToday(profile)?mins(parts)+30:0;const slots=[];for(const period of periods){for(let start=mins(period.start);start+service.duration<=mins(period.end);start+=15){if(start<minimum)continue;const end=start+service.duration,events=rows.filter(a=>start<mins(a.time)+a.duration&&end>mins(a.time)).map(a=>[Math.max(start,mins(a.time)),Math.min(end,mins(a.time)+a.duration)]);events.push([start,end]);if(peakConcurrency(events)<=capacity)slots.push(String(Math.floor(start/60)).padStart(2,'0')+':'+String(start%60).padStart(2,'0'))}}return [...new Set(slots)]}
-app.get('/api/public/offices/:id/availability',async(req,res)=>{if(!uuid(req.params.id))return res.status(404).json({error:'Página indisponível.'});const r=await pool.query('SELECT profile FROM manu_offices WHERE id=$1',[req.params.id]);const profile=r.rows[0]?.profile;if(!profile||profile.published==='no'||profile.onlineBooking==='no')return res.status(404).json({error:'Agendamento online indisponível.'});if(!validBookingDate(req.query.date,profile))return res.status(400).json({error:'Escolha uma data entre hoje e os próximos 120 dias.'});const state=(await pool.query('SELECT data FROM manu_states WHERE office_id=$1',[req.params.id])).rows[0]?.data||defaultState();res.json({slots:bookingSlots(profile,state,req.query.date,String(req.query.service||''))})});
-app.post('/api/public/offices/:id/bookings',async(req,res)=>{if(!uuid(req.params.id))return res.status(404).json({error:'Página indisponível.'});const body=req.body||{},name=String(body.name||'').trim(),phone=String(body.phone||'').replace(/\D/g,''),date=body.date,time=body.time,serviceId=body.service,mode=body.mode,requestId=body.requestId;if(body.website||name.length<2||name.length>100||!/^\d{10,15}$/.test(phone)||!uuid(requestId)||typeof serviceId!=='string'||serviceId.length>100||typeof time!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||!['Presencial','Online'].includes(mode))return res.status(400).json({error:'Revise seu nome, telefone, serviço, modalidade e horário.'});const rate=await pool.query(`INSERT INTO manu_auth_attempts(key,count,expires_at) VALUES($1,1,now()+interval '1 hour') ON CONFLICT(key) DO UPDATE SET count=CASE WHEN manu_auth_attempts.expires_at<now() THEN 1 ELSE manu_auth_attempts.count+1 END,expires_at=CASE WHEN manu_auth_attempts.expires_at<now() THEN now()+interval '1 hour' ELSE manu_auth_attempts.expires_at END RETURNING count`,[hash('public-booking:'+req.ip+':'+req.params.id)]);if(rate.rows[0].count>10){res.set('Retry-After','3600');return res.status(429).json({error:'Muitas solicitações. Entre em contato com o profissional ou tente mais tarde.'})}const c=await pool.connect();try{await c.query('BEGIN');const found=await c.query('SELECT profile FROM manu_offices WHERE id=$1 FOR UPDATE',[req.params.id]);const profile=found.rows[0]?.profile;if(!profile||profile.published==='no'||profile.onlineBooking==='no'){await c.query('ROLLBACK');return res.status(404).json({error:'Agendamento online indisponível.'})}const signature=hash(JSON.stringify({name,phone,date,time,serviceId,mode})),previous=await c.query('SELECT signature,receipt FROM manu_public_bookings WHERE request_id=$1 AND office_id=$2',[requestId,req.params.id]);if(previous.rowCount){await c.query('ROLLBACK');return previous.rows[0].signature===signature?res.json(previous.rows[0].receipt):res.status(409).json({error:'Esta solicitação já foi utilizada. Recarregue o formulário.'})}if(!validBookingDate(date,profile)){await c.query('ROLLBACK');return res.status(400).json({error:'Escolha uma data válida nos próximos 120 dias.'})}const allowedModes=profile.mode==='Online'?['Online']:profile.mode==='Presencial e online'?['Presencial','Online']:['Presencial'];if(!allowedModes.includes(mode)){await c.query('ROLLBACK');return res.status(400).json({error:'Esta modalidade não está disponível.'})}await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING',[req.params.id,defaultState()]);const row=(await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE',[req.params.id])).rows[0],state=row.data;if(!bookingSlots(profile,state,date,serviceId).includes(time)){await c.query('ROLLBACK');return res.status(409).json({error:'Este horário acabou de ficar indisponível. Escolha outro horário.'})}const service=state.settings.services.find(s=>s.id===serviceId);let patient=state.patients.find(p=>p.name.toLocaleLowerCase()===name.toLocaleLowerCase()&&String(p.phone||'').replace(/\D/g,'')===phone);if(!patient){patient={id:randomUUID(),name,phone,email:''};state.patients.push(patient)}const appointment={id:randomUUID(),patient:patient.id,service:service.id,serviceName:service.name,duration:service.duration,price:service.price,date,time,status:'Aguardando',mode,note:'Solicitação recebida pela página pública.',source:'public'};state.appointments.push(appointment);if(state.patients.length>10000||state.appointments.length>20000){await c.query('ROLLBACK');return res.status(409).json({error:'Não foi possível receber o agendamento. Fale com o profissional.'})}await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2',[state,req.params.id]);const receipt={reference:appointment.id,date,time,service:service.name,duration:service.duration,price:service.price,mode,status:'Aguardando'};await c.query('INSERT INTO manu_public_bookings(request_id,office_id,signature,receipt) VALUES($1,$2,$3,$4)',[requestId,req.params.id,signature,receipt]);await c.query('COMMIT');res.status(201).json(receipt);notifyBooking(profile,appointment,patient)}catch(e){await c.query('ROLLBACK');if(e.code==='23505')return res.status(409).json({error:'Solicitação já recebida. Atualize a página para continuar.'});throw e}finally{c.release()}});
-const EVO={url:(process.env.EVOLUTION_URL||'').replace(/\/+$/,''),key:process.env.EVOLUTION_APIKEY||''},evoReady=()=>!!(EVO.url&&EVO.key),waStatus=s=>s==='open'?'connected':s==='connecting'?'connecting':'disconnected',waPhone=j=>String(j||'').split('@')[0].split(':')[0].replace(/\D/g,'');
-async function evolution(path,{method='GET',body}={}){const r=await fetch(EVO.url+path,{method,headers:{'Content-Type':'application/json',apikey:EVO.key},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000)});let data={};try{data=await r.json()}catch{}return {status:r.status,ok:r.ok,data}}
-export function readEvolutionEvent(b){const event=String(b?.event||'').toLowerCase().replace(/_/g,'.'),d=(Array.isArray(b?.data)?b.data[0]:b?.data)||{};if(event==='connection.update')return {type:'connection',status:waStatus(d.state),phone:waPhone(d.wuid)};if(event!=='messages.upsert')return null;const key=d.key||{},jids=[key.remoteJid,key.remoteJidAlt,key.senderPn,d.senderPn].filter(j=>typeof j==='string');if(!key.id||jids.some(j=>/@(g\.us|broadcast|newsletter)$/.test(j)))return null;const phone=waPhone(jids.find(j=>j.endsWith('@s.whatsapp.net')));if(!/^\d{10,15}$/.test(phone))return null;const m=d.message||{},doc=m.documentMessage||m.documentWithCaptionMessage?.message?.documentMessage,text=m.conversation||m.extendedTextMessage?.text||m.imageMessage?.caption||m.videoMessage?.caption||doc?.caption||'';const kind=m.audioMessage||m.pttMessage?'audio':m.imageMessage?'image':doc?'document':m.videoMessage?'video':m.stickerMessage?'sticker':m.locationMessage||m.liveLocationMessage?'location':text?'text':'';if(!kind)return null;return {type:'message',messageId:String(key.id).slice(0,200),phone,name:key.fromMe?'':String(d.pushName||'').slice(0,100),direction:key.fromMe?'out':'in',kind,text:String(text).slice(0,4000)}}
-async function whatsappWebhook(req,res){const{officeId,secret}=req.params;if(!uuid(officeId)||!/^[a-f0-9]{64}$/.test(secret))return res.status(404).json({error:'Recurso não encontrado.'});const w=(await pool.query('SELECT secret,secret_next FROM manu_whatsapp WHERE office_id=$1',[officeId])).rows[0],given=Buffer.from(hash(secret),'hex'),same=h=>!!h&&timingSafeEqual(Buffer.from(h,'hex'),given);if(!w||!(same(w.secret)||same(w.secret_next)))return res.status(401).json({error:'Não autorizado.'});if(same(w.secret_next))await pool.query('UPDATE manu_whatsapp SET secret=secret_next,secret_next=NULL WHERE office_id=$1 AND secret_next=$2',[officeId,w.secret_next]);const e=readEvolutionEvent(req.body);if(e?.type==='connection')await pool.query("UPDATE manu_whatsapp SET status=$2,phone=CASE WHEN $3::text<>'' THEN $3 ELSE phone END,updated_at=now() WHERE office_id=$1",[officeId,e.status,e.phone]);if(e?.type==='message'){const saved=await pool.query('INSERT INTO manu_whatsapp_messages(office_id,message_id,phone,name,direction,kind,text) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id',[officeId,e.messageId,e.phone,e.name,e.direction,e.kind,e.text]);if(saved.rowCount){if(e.direction==='in'){if(!e.text.startsWith('Manu Saúde:'))queueBot(officeId,e)}else if(isBotEcho(officeId,e.phone,e.text))await pool.query("UPDATE manu_whatsapp_messages SET direction='bot' WHERE id=$1",[saved.rows[0].id]);else await pauseBot(officeId,e.phone)}}res.json({ok:true})}
-app.post('/webhook/whatsapp/:officeId/:secret',whatsappWebhook);app.post('/webhook/whatsapp/:officeId/:secret/:event',whatsappWebhook);
-app.get('/api/offices/:id/whatsapp',session,owner,async(req,res)=>{const w=(await pool.query("SELECT instance,status,phone,bot,pause_minutes,reminders,updated_at>now()-interval '2 minutes' AS recent FROM manu_whatsapp WHERE office_id=$1",[req.params.id])).rows[0];let status=w?.status||'disconnected';if(w&&evoReady()){try{const r=await evolution('/instance/connectionState/'+encodeURIComponent(w.instance));if(r.ok||r.status===404){status=r.ok?waStatus(r.data?.instance?.state||r.data?.state):'disconnected';if(status==='disconnected'&&w.status==='connecting'&&w.recent)status='connecting';await pool.query('UPDATE manu_whatsapp SET status=$2,updated_at=CASE WHEN status<>$2 THEN now() ELSE updated_at END WHERE office_id=$1',[req.params.id,status])}}catch(e){console.error('Falha ao consultar o WhatsApp:',e.message)}}const rows=(await pool.query("SELECT c.*,(SELECT n.name FROM manu_whatsapp_messages n WHERE n.office_id=$1 AND n.phone=c.phone AND n.name<>'' ORDER BY n.created_at DESC LIMIT 1) AS contact FROM (SELECT DISTINCT ON (phone) phone,direction,kind,text,created_at FROM manu_whatsapp_messages WHERE office_id=$1 ORDER BY phone,created_at DESC,id DESC) c ORDER BY c.created_at DESC LIMIT 30",[req.params.id])).rows;res.json({configured:evoReady(),status,bot:!!w?.bot,pauseMinutes:w?.pause_minutes||120,reminders:w?w.reminders:true,phone:status==='connected'?w?.phone||'':'',conversations:rows.map(c=>({phone:c.phone,name:c.contact||'',direction:c.direction,kind:c.kind,text:c.text.slice(0,160),at:c.created_at}))})});
-app.post('/api/offices/:id/whatsapp/connect',session,owner,async(req,res)=>{if(!evoReady())return res.status(503).json({error:'A conexão com o WhatsApp ainda não foi configurada no servidor (EVOLUTION_URL e EVOLUTION_APIKEY).'});const instance='manu-'+req.params.id,inst=encodeURIComponent(instance),secret=randomBytes(32).toString('hex'),base=(process.env.APP_URL||`${req.protocol}://${req.get('host')}`).replace(/\/+$/,'');const previous=(await pool.query('SELECT status FROM manu_whatsapp WHERE office_id=$1',[req.params.id])).rows[0]?.status||'disconnected';await pool.query("INSERT INTO manu_whatsapp(office_id,instance,secret,status) VALUES($1,$2,$3,'connecting') ON CONFLICT(office_id) DO UPDATE SET status='connecting',secret_next=$3,updated_at=now()",[req.params.id,instance,hash(secret)]);try{const created=await evolution('/instance/create',{method:'POST',body:{instanceName:instance,integration:'WHATSAPP-BAILEYS',qrcode:false}});if(!created.ok&&![403,409].includes(created.status))throw Error('criar instância: '+created.status);const hook=await evolution('/webhook/set/'+inst,{method:'POST',body:{webhook:{enabled:true,url:`${base}/webhook/whatsapp/${req.params.id}/${secret}`,byEvents:false,base64:false,events:['MESSAGES_UPSERT','CONNECTION_UPDATE']}}});if(!hook.ok)throw Error('webhook: '+hook.status);await pool.query('UPDATE manu_whatsapp SET secret=$2,secret_next=NULL WHERE office_id=$1',[req.params.id,hash(secret)]);const state=await evolution('/instance/connectionState/'+inst);if(state.ok&&waStatus(state.data?.instance?.state)==='connected'){await pool.query("UPDATE manu_whatsapp SET status='connected',updated_at=now() WHERE office_id=$1",[req.params.id]);return res.json({status:'connected'})}const qr=await evolution('/instance/connect/'+inst),raw=String(qr.data?.base64||''),image=raw.startsWith('data:')?raw:'data:image/png;base64,'+raw;if(!qr.ok||!raw||!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(image))throw Error('QR code: '+qr.status);res.json({status:'connecting',qr:image})}catch(e){console.error('Falha ao conectar o WhatsApp:',e.message);await pool.query("UPDATE manu_whatsapp SET status=$2,updated_at=now() WHERE office_id=$1",[req.params.id,previous]);res.status(502).json({error:'Não foi possível falar com o servidor do WhatsApp. Tente novamente em instantes.'})}});
-app.post('/api/offices/:id/whatsapp/disconnect',session,owner,async(req,res)=>{const w=(await pool.query('SELECT instance FROM manu_whatsapp WHERE office_id=$1',[req.params.id])).rows[0];if(w&&evoReady()){let r;try{r=await evolution('/instance/logout/'+encodeURIComponent(w.instance),{method:'DELETE'})}catch(e){console.error('Falha ao desconectar o WhatsApp:',e.message)}if(!r||(!r.ok&&![400,404].includes(r.status))){if(r)console.error('Falha ao desconectar o WhatsApp: Evolution respondeu',r.status);return res.status(502).json({error:'Não foi possível desconectar agora. O WhatsApp continua conectado. Tente novamente em instantes.'})}}await pool.query("UPDATE manu_whatsapp SET status='disconnected',phone='',secret=$2,secret_next=NULL,updated_at=now() WHERE office_id=$1",[req.params.id,hash(randomBytes(32).toString('hex'))]);res.json({status:'disconnected'})});
+export function privateInput() {
+  return {};
+}
+app.put('/api/offices/:id/professional', session, owner, async (req, res) => {
+  let profile, personal;
+  try {
+    profile = profileInput(req.body.profile);
+    personal = privateInput(req.body.personal);
+  } catch {
+    return res.status(400).json({ error: 'Revise os dados do perfil e as imagens.' });
+  }
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const a = await c.query(
+      'UPDATE manu_offices SET profile=$1,version=version+1 WHERE id=$2 AND owner_id=$3 AND version=$4 RETURNING version',
+      [profile, req.params.id, req.user.id, req.body.profileVersion],
+    );
+    const b = await c.query(
+      'UPDATE manu_private_profiles SET data=$1,version=version+1 WHERE user_id=$2 AND version=$3 RETURNING version',
+      [personal, req.user.id, req.body.personalVersion],
+    );
+    if (!a.rowCount || !b.rowCount) {
+      await c.query('ROLLBACK');
+      return res
+        .status(409)
+        .json({ error: 'O perfil foi alterado em outra aba. Recarregue antes de salvar novamente.' });
+    }
+    await c.query('COMMIT');
+    res.json({
+      office: { ...profile, id: req.params.id, _version: a.rows[0].version },
+      personal: { data: personal, version: b.rows[0].version },
+    });
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+app.post('/api/auth/change-password', session, throttle, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (
+    typeof currentPassword !== 'string' ||
+    currentPassword.length > 128 ||
+    typeof newPassword !== 'string' ||
+    newPassword.length < 10 ||
+    newPassword.length > 128
+  )
+    return res.status(400).json({ error: 'Informe a senha atual e uma nova senha de 10 a 128 caracteres.' });
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const r = await c.query('SELECT password FROM manu_users WHERE id=$1 FOR UPDATE', [req.user.id]);
+    const [salt, stored] = r.rows[0].password.split(':'),
+      key = await scrypt(currentPassword, salt, 64);
+    if (!timingSafeEqual(key, Buffer.from(stored, 'hex'))) {
+      await c.query('ROLLBACK');
+      return res.status(400).json({ error: 'A senha atual não confere.' });
+    }
+    const nextSalt = randomBytes(16).toString('hex'),
+      next = await scrypt(newPassword, nextSalt, 64);
+    await c.query('UPDATE manu_users SET password=$1 WHERE id=$2', [
+      nextSalt + ':' + next.toString('hex'),
+      req.user.id,
+    ]);
+    await c.query('DELETE FROM manu_sessions WHERE user_id=$1 AND token<>$2', [req.user.id, hash(cookie(req))]);
+    await c.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+export function publicProfile(input) {
+  const p = { ...input };
+  p.showEmail = p.showEmail || 'no';
+  p.showPhone = p.showPhone || 'no';
+  p.showAddress = p.showAddress || 'yes';
+  if (p.showEmail !== 'yes') p.email = '';
+  if (p.showPhone !== 'yes') p.phone = '';
+  if (p.showAddress !== 'yes') for (const key of ['address', 'city', 'state', 'accessibility']) p[key] = '';
+  return p;
+}
+async function publicOfficeData(id, source) {
+  const data = await pool.query('SELECT data FROM manu_states WHERE office_id=$1', [id]);
+  const profile = publicProfile(source),
+    cfg = data.rows[0]?.data?.settings;
+  if (cfg) {
+    profile.hours = Array.from({ length: 7 }, (_, day) => {
+      const periods = effectivePeriods(cfg, day);
+      return periods.length
+        ? ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'][day] +
+            ': ' +
+            periods.map((p) => p.start + ' às ' + p.end).join(' e ')
+        : '';
+    })
+      .filter(Boolean)
+      .join('\n');
+    const available = cfg.services.filter(
+      (s) => cfg.procedureMode !== 'custom' || (cfg.procedureIds || []).includes(s.id),
+    );
+    profile.bookingServices = available.map(({ id, name, duration, price }) => ({ id, name, duration, price }));
+    profile.services = available
+      .map(
+        (s) =>
+          s.name +
+          ' · ' +
+          s.duration +
+          ' minutos · ' +
+          Number(s.price).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+      )
+      .join('\n');
+  }
+  return { ...profile, id };
+}
+app.get('/api/offices/:id/preview', session, owner, async (req, res) =>
+  res.json({ office: await publicOfficeData(req.params.id, req.office.profile) }),
+);
+app.get('/api/public/offices/:id', async (req, res) => {
+  if (!uuid(req.params.id)) return res.status(404).json({ error: 'Página indisponível.' });
+  const r = await pool.query('SELECT profile FROM manu_offices WHERE id=$1', [req.params.id]);
+  if (!r.rowCount || r.rows[0].profile.published === 'no')
+    return res.status(404).json({ error: 'Página indisponível.' });
+  res.json({ office: await publicOfficeData(req.params.id, r.rows[0].profile) });
+});
+const defaultState = () => ({
+  patients: [],
+  appointments: [],
+  settings: {
+    days: [1, 2, 3, 4, 5],
+    start: '09:00',
+    end: '18:00',
+    services: [{ id: 'consulta', name: 'Consulta', duration: 30, price: 0 }],
+  },
+});
+app.get('/api/offices/:id/state', session, owner, async (req, res) => {
+  await pool.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING', [
+    req.params.id,
+    defaultState(),
+  ]);
+  const r = await pool.query('SELECT data,version FROM manu_states WHERE office_id=$1', [req.params.id]);
+  res.json(r.rows[0]);
+});
+export function simultaneousCapacity(cfg) {
+  return cfg.capacityMode === 'ask'
+    ? 0
+    : cfg.capacityMode === 'fixed'
+      ? cfg.simultaneousLimit
+      : (cfg.clinicSimultaneousLimit ?? 1);
+}
+export function peakConcurrency(intervals) {
+  const events = intervals
+    .flatMap(([start, end]) => [
+      [start, 1],
+      [end, -1],
+    ])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let current = 0,
+    max = 0;
+  for (const [, delta] of events) {
+    current += delta;
+    max = Math.max(max, current);
+  }
+  return max;
+}
+export function effectivePeriods(settings, day) {
+  return settings.scheduleMode === 'custom'
+    ? settings.weeklySchedule?.[String(day)] || []
+    : settings.days.includes(day)
+      ? [{ start: settings.start, end: settings.end }]
+      : [];
+}
+function validateWeekly(cfg) {
+  if (cfg.scheduleMode !== undefined && !['clinic', 'custom'].includes(cfg.scheduleMode)) throw Error('validation');
+  if (cfg.weeklySchedule === undefined) {
+    if (cfg.scheduleMode === 'custom') throw Error('validation');
+    return;
+  }
+  if (
+    !cfg.weeklySchedule ||
+    typeof cfg.weeklySchedule !== 'object' ||
+    Array.isArray(cfg.weeklySchedule) ||
+    Object.keys(cfg.weeklySchedule).some((k) => !/^[0-6]$/.test(k))
+  )
+    throw Error('validation');
+  let total = 0;
+  for (let day = 0; day < 7; day++) {
+    const periods = cfg.weeklySchedule[day] || [];
+    if (!Array.isArray(periods) || periods.length > 4) throw Error('validation');
+    for (const p of periods)
+      if (
+        !p ||
+        !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.start) ||
+        !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.end) ||
+        p.start >= p.end
+      )
+        throw Error('validation');
+    const sorted = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+    for (let i = 1; i < sorted.length; i++) if (sorted[i].start < sorted[i - 1].end) throw Error('validation');
+    total += periods.length;
+  }
+  if (cfg.scheduleMode === 'custom' && !total) throw Error('validation');
+}
+export function validateState(s) {
+  const fail = () => {
+    throw Error('validation');
+  };
+  if (
+    !s ||
+    !Array.isArray(s.patients) ||
+    !Array.isArray(s.appointments) ||
+    s.patients.length > 10000 ||
+    s.appointments.length > 20000 ||
+    !s.settings
+  )
+    fail();
+  const time = (t) => typeof t === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(t);
+  const str = (t, n) => typeof t === 'string' && t.length <= n;
+  const ids = new Set();
+  for (const p of s.patients) {
+    if (
+      !str(p.id, 100) ||
+      !p.id ||
+      ids.has(p.id) ||
+      !str(p.name, 100) ||
+      !p.name.trim() ||
+      !str(p.phone || '', 25) ||
+      !str(p.email || '', 150)
+    )
+      fail();
+    ids.add(p.id);
+  }
+  const cfg = s.settings;
+  validateWeekly(cfg);
+  if (cfg.capacityMode !== undefined && !['inherit', 'ask', 'fixed'].includes(cfg.capacityMode)) fail();
+  if (
+    cfg.clinicSimultaneousLimit !== undefined &&
+    (!Number.isInteger(cfg.clinicSimultaneousLimit) ||
+      cfg.clinicSimultaneousLimit < 0 ||
+      cfg.clinicSimultaneousLimit > 20)
+  )
+    fail();
+  if (
+    cfg.capacityMode === 'fixed' &&
+    (!Number.isInteger(cfg.simultaneousLimit) || cfg.simultaneousLimit < 1 || cfg.simultaneousLimit > 20)
+  )
+    fail();
+  if (
+    !Array.isArray(cfg.days) ||
+    !cfg.days.length ||
+    cfg.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6) ||
+    !time(cfg.start) ||
+    !time(cfg.end) ||
+    cfg.start >= cfg.end ||
+    !Array.isArray(cfg.services) ||
+    !cfg.services.length ||
+    cfg.services.length > 100
+  )
+    fail();
+  if (cfg.dailyLimit !== undefined && (!Number.isInteger(cfg.dailyLimit) || cfg.dailyLimit < 0 || cfg.dailyLimit > 200))
+    fail();
+  const services = new Set();
+  for (const v of cfg.services) {
+    if (
+      !str(v.id, 100) ||
+      !v.id ||
+      services.has(v.id) ||
+      !str(v.name, 100) ||
+      !v.name.trim() ||
+      !Number.isInteger(v.duration) ||
+      v.duration < 5 ||
+      v.duration > 240 ||
+      v.duration % 5 ||
+      !Number.isFinite(v.price) ||
+      v.price < 0 ||
+      v.price > 99999
+    )
+      fail();
+    services.add(v.id);
+  }
+  if (cfg.procedureMode !== undefined && !['all', 'custom'].includes(cfg.procedureMode)) fail();
+  if (
+    cfg.procedureIds !== undefined &&
+    (!Array.isArray(cfg.procedureIds) ||
+      cfg.procedureIds.length > 100 ||
+      cfg.procedureIds.some((id) => !services.has(id)))
+  )
+    fail();
+  const aps = new Set(),
+    byDate = new Map(),
+    mins = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+  for (const a of s.appointments) {
+    const d = new Date(a.date + 'T12:00:00Z');
+    if (
+      !str(a.id, 100) ||
+      !a.id ||
+      aps.has(a.id) ||
+      !ids.has(a.patient) ||
+      !str(a.service, 100) ||
+      !str(a.serviceName, 100) ||
+      !str(a.note || '', 500) ||
+      !time(a.time) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(a.date) ||
+      !Number.isFinite(d.valueOf()) ||
+      d.toISOString().slice(0, 10) !== a.date ||
+      !Number.isInteger(a.duration) ||
+      a.duration < 5 ||
+      a.duration > 240 ||
+      !Number.isFinite(a.price) ||
+      a.price < 0 ||
+      !['Agendada', 'Confirmada', 'Aguardando', 'Concluída', 'Não compareceu', 'Cancelada'].includes(a.status) ||
+      !['Presencial', 'Online'].includes(a.mode)
+    )
+      fail();
+    aps.add(a.id);
+    if (['Cancelada', 'Não compareceu'].includes(a.status)) continue;
+    const group = byDate.get(a.date) || [];
+    group.push([mins(a.time), mins(a.time) + a.duration]);
+    byDate.set(a.date, group);
+  }
+  for (const slots of byDate.values()) {
+    const cap = simultaneousCapacity(cfg);
+    if (cap > 0 && peakConcurrency(slots) > cap) throw Error('overlap');
+  }
+  return true;
+}
+app.put('/api/offices/:id/state', session, owner, async (req, res) => {
+  try {
+    validateState(req.body.data);
+  } catch (e) {
+    return res
+      .status(400)
+      .json({
+        error:
+          e.message === 'overlap'
+            ? 'O limite de agendamentos simultâneos foi atingido. Revise os horários ou a capacidade configurada.'
+            : 'Dados de agendamento inválidos. Revise o cadastro.',
+      });
+  }
+  const next = req.body.data;
+  const prior = await pool.query('SELECT data,version FROM manu_states WHERE office_id=$1', [req.params.id]);
+  if (!prior.rowCount || prior.rows[0].version !== req.body.version)
+    return res.status(409).json({ error: 'A agenda foi atualizada. Recarregue a página antes de salvar.' });
+  const cfg = next.settings;
+  if (cfg.dailyLimit > 0) {
+    const dates = new Set(next.appointments.map((a) => a.date));
+    for (const date of dates) {
+      const active = (a) => a.date === date && !['Cancelada', 'Não compareceu'].includes(a.status);
+      const newCount = next.appointments.filter(active).length,
+        oldCount = prior.rows[0].data.appointments.filter(active).length;
+      if (newCount > cfg.dailyLimit && newCount > oldCount)
+        return res.status(400).json({ error: 'Limite de agendamentos do dia atingido.' });
+    }
+  }
+  const mins = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+  for (const a of next.appointments) {
+    const old = prior.rows[0].data.appointments.find((v) => v.id === a.id);
+    if (['Cancelada', 'Não compareceu'].includes(a.status)) continue;
+    const changed =
+      !old ||
+      old.date !== a.date ||
+      old.time !== a.time ||
+      old.duration !== a.duration ||
+      old.service !== a.service ||
+      ['Cancelada', 'Não compareceu'].includes(old.status);
+    if (
+      changed &&
+      simultaneousCapacity(cfg) === 0 &&
+      next.appointments.some(
+        (b) =>
+          b.id !== a.id &&
+          b.date === a.date &&
+          !['Cancelada', 'Não compareceu'].includes(b.status) &&
+          mins(a.time) < mins(b.time) + b.duration &&
+          mins(a.time) + a.duration > mins(b.time),
+      ) &&
+      req.body.overlapConfirmed !== true
+    )
+      return res.status(409).json({ error: 'Confirme a sobreposição antes de salvar este agendamento.' });
+    if (changed && cfg.procedureMode === 'custom' && !(cfg.procedureIds || []).includes(a.service))
+      return res.status(400).json({ error: 'Este procedimento não está habilitado para o profissional.' });
+    if (
+      changed &&
+      !effectivePeriods(cfg, new Date(a.date + 'T12:00:00Z').getUTCDay()).some(
+        (p) => mins(a.time) >= mins(p.start) && mins(a.time) + a.duration <= mins(p.end),
+      )
+    )
+      return res.status(400).json({ error: 'A consulta está fora dos dias ou horários de atendimento.' });
+  }
+  const r = await pool.query(
+    'UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2 AND version=$3 RETURNING version',
+    [next, req.params.id, req.body.version],
+  );
+  if (!r.rowCount)
+    return res
+      .status(409)
+      .json({
+        error:
+          'A agenda mudou em outra aba ou dispositivo. Recarregue a página para ver os dados atuais antes de salvar.',
+      });
+  res.json({ version: r.rows[0].version });
+});
+function officeToday(profile) {
+  return new Date().toLocaleDateString('en-CA', { timeZone: profile.timezone || 'America/Sao_Paulo' });
+}
+function validBookingDate(date, profile) {
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const d = new Date(date + 'T12:00:00Z'),
+    first = officeToday(profile),
+    last = new Date(first + 'T12:00:00Z');
+  last.setUTCDate(last.getUTCDate() + 120);
+  return (
+    Number.isFinite(d.valueOf()) &&
+    d.toISOString().slice(0, 10) === date &&
+    date >= first &&
+    date <= last.toISOString().slice(0, 10)
+  );
+}
+const activeBooking = (a) => !['Cancelada', 'Não compareceu'].includes(a.status);
+export function bookingSlots(profile, state, date, serviceId) {
+  if (!validBookingDate(date, profile)) return [];
+  const cfg = state.settings,
+    service = cfg.services.find(
+      (s) => s.id === serviceId && (cfg.procedureMode !== 'custom' || (cfg.procedureIds || []).includes(s.id)),
+    );
+  if (!service) return [];
+  const mins = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3)),
+    rows = state.appointments.filter((a) => a.date === date && activeBooking(a));
+  if (cfg.dailyLimit > 0 && rows.length >= cfg.dailyLimit) return [];
+  const capacity = simultaneousCapacity(cfg) || 1,
+    periods = effectivePeriods(cfg, new Date(date + 'T12:00:00Z').getUTCDay()),
+    now = new Date(),
+    parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: profile.timezone || 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(now),
+    minimum = date === officeToday(profile) ? mins(parts) + 30 : 0;
+  const slots = [];
+  for (const period of periods) {
+    for (let start = mins(period.start); start + service.duration <= mins(period.end); start += 15) {
+      if (start < minimum) continue;
+      const end = start + service.duration,
+        events = rows
+          .filter((a) => start < mins(a.time) + a.duration && end > mins(a.time))
+          .map((a) => [Math.max(start, mins(a.time)), Math.min(end, mins(a.time) + a.duration)]);
+      events.push([start, end]);
+      if (peakConcurrency(events) <= capacity)
+        slots.push(String(Math.floor(start / 60)).padStart(2, '0') + ':' + String(start % 60).padStart(2, '0'));
+    }
+  }
+  return [...new Set(slots)];
+}
+app.get('/api/public/offices/:id/availability', async (req, res) => {
+  if (!uuid(req.params.id)) return res.status(404).json({ error: 'Página indisponível.' });
+  const r = await pool.query('SELECT profile FROM manu_offices WHERE id=$1', [req.params.id]);
+  const profile = r.rows[0]?.profile;
+  if (!profile || profile.published === 'no' || profile.onlineBooking === 'no')
+    return res.status(404).json({ error: 'Agendamento online indisponível.' });
+  if (!validBookingDate(req.query.date, profile))
+    return res.status(400).json({ error: 'Escolha uma data entre hoje e os próximos 120 dias.' });
+  const state =
+    (await pool.query('SELECT data FROM manu_states WHERE office_id=$1', [req.params.id])).rows[0]?.data ||
+    defaultState();
+  res.json({ slots: bookingSlots(profile, state, req.query.date, String(req.query.service || '')) });
+});
+app.post('/api/public/offices/:id/bookings', async (req, res) => {
+  if (!uuid(req.params.id)) return res.status(404).json({ error: 'Página indisponível.' });
+  const body = req.body || {},
+    name = String(body.name || '').trim(),
+    phone = String(body.phone || '').replace(/\D/g, ''),
+    date = body.date,
+    time = body.time,
+    serviceId = body.service,
+    mode = body.mode,
+    requestId = body.requestId;
+  if (
+    body.website ||
+    name.length < 2 ||
+    name.length > 100 ||
+    !/^\d{10,15}$/.test(phone) ||
+    !uuid(requestId) ||
+    typeof serviceId !== 'string' ||
+    serviceId.length > 100 ||
+    typeof time !== 'string' ||
+    !/^([01]\d|2[0-3]):[0-5]\d$/.test(time) ||
+    !['Presencial', 'Online'].includes(mode)
+  )
+    return res.status(400).json({ error: 'Revise seu nome, telefone, serviço, modalidade e horário.' });
+  const rate = await pool.query(
+    `INSERT INTO manu_auth_attempts(key,count,expires_at) VALUES($1,1,now()+interval '1 hour') ON CONFLICT(key) DO UPDATE SET count=CASE WHEN manu_auth_attempts.expires_at<now() THEN 1 ELSE manu_auth_attempts.count+1 END,expires_at=CASE WHEN manu_auth_attempts.expires_at<now() THEN now()+interval '1 hour' ELSE manu_auth_attempts.expires_at END RETURNING count`,
+    [hash('public-booking:' + req.ip + ':' + req.params.id)],
+  );
+  if (rate.rows[0].count > 10) {
+    res.set('Retry-After', '3600');
+    return res
+      .status(429)
+      .json({ error: 'Muitas solicitações. Entre em contato com o profissional ou tente mais tarde.' });
+  }
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const found = await c.query('SELECT profile FROM manu_offices WHERE id=$1 FOR UPDATE', [req.params.id]);
+    const profile = found.rows[0]?.profile;
+    if (!profile || profile.published === 'no' || profile.onlineBooking === 'no') {
+      await c.query('ROLLBACK');
+      return res.status(404).json({ error: 'Agendamento online indisponível.' });
+    }
+    const signature = hash(JSON.stringify({ name, phone, date, time, serviceId, mode })),
+      previous = await c.query(
+        'SELECT signature,receipt FROM manu_public_bookings WHERE request_id=$1 AND office_id=$2',
+        [requestId, req.params.id],
+      );
+    if (previous.rowCount) {
+      await c.query('ROLLBACK');
+      return previous.rows[0].signature === signature
+        ? res.json(previous.rows[0].receipt)
+        : res.status(409).json({ error: 'Esta solicitação já foi utilizada. Recarregue o formulário.' });
+    }
+    if (!validBookingDate(date, profile)) {
+      await c.query('ROLLBACK');
+      return res.status(400).json({ error: 'Escolha uma data válida nos próximos 120 dias.' });
+    }
+    const allowedModes =
+      profile.mode === 'Online'
+        ? ['Online']
+        : profile.mode === 'Presencial e online'
+          ? ['Presencial', 'Online']
+          : ['Presencial'];
+    if (!allowedModes.includes(mode)) {
+      await c.query('ROLLBACK');
+      return res.status(400).json({ error: 'Esta modalidade não está disponível.' });
+    }
+    await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING', [
+      req.params.id,
+      defaultState(),
+    ]);
+    const row = (await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE', [req.params.id])).rows[0],
+      state = row.data;
+    if (!bookingSlots(profile, state, date, serviceId).includes(time)) {
+      await c.query('ROLLBACK');
+      return res.status(409).json({ error: 'Este horário acabou de ficar indisponível. Escolha outro horário.' });
+    }
+    const service = state.settings.services.find((s) => s.id === serviceId);
+    let patient = state.patients.find(
+      (p) =>
+        p.name.toLocaleLowerCase() === name.toLocaleLowerCase() && String(p.phone || '').replace(/\D/g, '') === phone,
+    );
+    if (!patient) {
+      patient = { id: randomUUID(), name, phone, email: '' };
+      state.patients.push(patient);
+    }
+    const appointment = {
+      id: randomUUID(),
+      patient: patient.id,
+      service: service.id,
+      serviceName: service.name,
+      duration: service.duration,
+      price: service.price,
+      date,
+      time,
+      status: 'Aguardando',
+      mode,
+      note: 'Solicitação recebida pela página pública.',
+      source: 'public',
+    };
+    state.appointments.push(appointment);
+    if (state.patients.length > 10000 || state.appointments.length > 20000) {
+      await c.query('ROLLBACK');
+      return res.status(409).json({ error: 'Não foi possível receber o agendamento. Fale com o profissional.' });
+    }
+    await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2', [state, req.params.id]);
+    const receipt = {
+      reference: appointment.id,
+      date,
+      time,
+      service: service.name,
+      duration: service.duration,
+      price: service.price,
+      mode,
+      status: 'Aguardando',
+    };
+    await c.query('INSERT INTO manu_public_bookings(request_id,office_id,signature,receipt) VALUES($1,$2,$3,$4)', [
+      requestId,
+      req.params.id,
+      signature,
+      receipt,
+    ]);
+    await c.query('COMMIT');
+    res.status(201).json(receipt);
+    notifyBooking(profile, appointment, patient);
+  } catch (e) {
+    await c.query('ROLLBACK');
+    if (e.code === '23505')
+      return res.status(409).json({ error: 'Solicitação já recebida. Atualize a página para continuar.' });
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+const EVO = { url: (process.env.EVOLUTION_URL || '').replace(/\/+$/, ''), key: process.env.EVOLUTION_APIKEY || '' },
+  evoReady = () => !!(EVO.url && EVO.key),
+  waStatus = (s) => (s === 'open' ? 'connected' : s === 'connecting' ? 'connecting' : 'disconnected'),
+  waPhone = (j) =>
+    String(j || '')
+      .split('@')[0]
+      .split(':')[0]
+      .replace(/\D/g, '');
+async function evolution(path, { method = 'GET', body } = {}) {
+  const r = await fetch(EVO.url + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', apikey: EVO.key },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  return { status: r.status, ok: r.ok, data };
+}
+export function readEvolutionEvent(b) {
+  const event = String(b?.event || '')
+      .toLowerCase()
+      .replace(/_/g, '.'),
+    d = (Array.isArray(b?.data) ? b.data[0] : b?.data) || {};
+  if (event === 'connection.update') return { type: 'connection', status: waStatus(d.state), phone: waPhone(d.wuid) };
+  if (event !== 'messages.upsert') return null;
+  const key = d.key || {},
+    jids = [key.remoteJid, key.remoteJidAlt, key.senderPn, d.senderPn].filter((j) => typeof j === 'string');
+  if (!key.id || jids.some((j) => /@(g\.us|broadcast|newsletter)$/.test(j))) return null;
+  const phone = waPhone(jids.find((j) => j.endsWith('@s.whatsapp.net')));
+  if (!/^\d{10,15}$/.test(phone)) return null;
+  const m = d.message || {},
+    doc = m.documentMessage || m.documentWithCaptionMessage?.message?.documentMessage,
+    text =
+      m.conversation ||
+      m.extendedTextMessage?.text ||
+      m.imageMessage?.caption ||
+      m.videoMessage?.caption ||
+      doc?.caption ||
+      '';
+  const kind =
+    m.audioMessage || m.pttMessage
+      ? 'audio'
+      : m.imageMessage
+        ? 'image'
+        : doc
+          ? 'document'
+          : m.videoMessage
+            ? 'video'
+            : m.stickerMessage
+              ? 'sticker'
+              : m.locationMessage || m.liveLocationMessage
+                ? 'location'
+                : text
+                  ? 'text'
+                  : '';
+  if (!kind) return null;
+  return {
+    type: 'message',
+    messageId: String(key.id).slice(0, 200),
+    phone,
+    name: key.fromMe ? '' : String(d.pushName || '').slice(0, 100),
+    direction: key.fromMe ? 'out' : 'in',
+    kind,
+    text: String(text).slice(0, 4000),
+  };
+}
+async function whatsappWebhook(req, res) {
+  const { officeId, secret } = req.params;
+  if (!uuid(officeId) || !/^[a-f0-9]{64}$/.test(secret))
+    return res.status(404).json({ error: 'Recurso não encontrado.' });
+  const w = (await pool.query('SELECT secret,secret_next FROM manu_whatsapp WHERE office_id=$1', [officeId])).rows[0],
+    given = Buffer.from(hash(secret), 'hex'),
+    same = (h) => !!h && timingSafeEqual(Buffer.from(h, 'hex'), given);
+  if (!w || !(same(w.secret) || same(w.secret_next))) return res.status(401).json({ error: 'Não autorizado.' });
+  if (same(w.secret_next))
+    await pool.query(
+      'UPDATE manu_whatsapp SET secret=secret_next,secret_next=NULL WHERE office_id=$1 AND secret_next=$2',
+      [officeId, w.secret_next],
+    );
+  const e = readEvolutionEvent(req.body);
+  if (e?.type === 'connection')
+    await pool.query(
+      "UPDATE manu_whatsapp SET status=$2,phone=CASE WHEN $3::text<>'' THEN $3 ELSE phone END,updated_at=now() WHERE office_id=$1",
+      [officeId, e.status, e.phone],
+    );
+  if (e?.type === 'message') {
+    const saved = await pool.query(
+      'INSERT INTO manu_whatsapp_messages(office_id,message_id,phone,name,direction,kind,text) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id',
+      [officeId, e.messageId, e.phone, e.name, e.direction, e.kind, e.text],
+    );
+    if (saved.rowCount) {
+      if (e.direction === 'in') {
+        if (!e.text.startsWith('Manu Saúde:')) queueBot(officeId, e);
+      } else if (isBotEcho(officeId, e.phone, e.text))
+        await pool.query("UPDATE manu_whatsapp_messages SET direction='bot' WHERE id=$1", [saved.rows[0].id]);
+      else await pauseBot(officeId, e.phone);
+    }
+  }
+  res.json({ ok: true });
+}
+app.post('/webhook/whatsapp/:officeId/:secret', whatsappWebhook);
+app.post('/webhook/whatsapp/:officeId/:secret/:event', whatsappWebhook);
+app.get('/api/offices/:id/whatsapp', session, owner, async (req, res) => {
+  const w = (
+    await pool.query(
+      "SELECT instance,status,phone,bot,pause_minutes,reminders,updated_at>now()-interval '2 minutes' AS recent FROM manu_whatsapp WHERE office_id=$1",
+      [req.params.id],
+    )
+  ).rows[0];
+  let status = w?.status || 'disconnected';
+  if (w && evoReady()) {
+    try {
+      const r = await evolution('/instance/connectionState/' + encodeURIComponent(w.instance));
+      if (r.ok || r.status === 404) {
+        status = r.ok ? waStatus(r.data?.instance?.state || r.data?.state) : 'disconnected';
+        if (status === 'disconnected' && w.status === 'connecting' && w.recent) status = 'connecting';
+        await pool.query(
+          'UPDATE manu_whatsapp SET status=$2,updated_at=CASE WHEN status<>$2 THEN now() ELSE updated_at END WHERE office_id=$1',
+          [req.params.id, status],
+        );
+      }
+    } catch (e) {
+      console.error('Falha ao consultar o WhatsApp:', e.message);
+    }
+  }
+  const rows = (
+    await pool.query(
+      "SELECT c.*,(SELECT n.name FROM manu_whatsapp_messages n WHERE n.office_id=$1 AND n.phone=c.phone AND n.name<>'' ORDER BY n.created_at DESC LIMIT 1) AS contact FROM (SELECT DISTINCT ON (phone) phone,direction,kind,text,created_at FROM manu_whatsapp_messages WHERE office_id=$1 ORDER BY phone,created_at DESC,id DESC) c ORDER BY c.created_at DESC LIMIT 30",
+      [req.params.id],
+    )
+  ).rows;
+  res.json({
+    configured: evoReady(),
+    status,
+    bot: !!w?.bot,
+    pauseMinutes: w?.pause_minutes || 120,
+    reminders: w ? w.reminders : true,
+    phone: status === 'connected' ? w?.phone || '' : '',
+    conversations: rows.map((c) => ({
+      phone: c.phone,
+      name: c.contact || '',
+      direction: c.direction,
+      kind: c.kind,
+      text: c.text.slice(0, 160),
+      at: c.created_at,
+    })),
+  });
+});
+app.post('/api/offices/:id/whatsapp/connect', session, owner, async (req, res) => {
+  if (!evoReady())
+    return res
+      .status(503)
+      .json({
+        error: 'A conexão com o WhatsApp ainda não foi configurada no servidor (EVOLUTION_URL e EVOLUTION_APIKEY).',
+      });
+  const instance = 'manu-' + req.params.id,
+    inst = encodeURIComponent(instance),
+    secret = randomBytes(32).toString('hex'),
+    base = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  const previous =
+    (await pool.query('SELECT status FROM manu_whatsapp WHERE office_id=$1', [req.params.id])).rows[0]?.status ||
+    'disconnected';
+  await pool.query(
+    "INSERT INTO manu_whatsapp(office_id,instance,secret,status) VALUES($1,$2,$3,'connecting') ON CONFLICT(office_id) DO UPDATE SET status='connecting',secret_next=$3,updated_at=now()",
+    [req.params.id, instance, hash(secret)],
+  );
+  try {
+    const created = await evolution('/instance/create', {
+      method: 'POST',
+      body: { instanceName: instance, integration: 'WHATSAPP-BAILEYS', qrcode: false },
+    });
+    if (!created.ok && ![403, 409].includes(created.status)) throw Error('criar instância: ' + created.status);
+    const hook = await evolution('/webhook/set/' + inst, {
+      method: 'POST',
+      body: {
+        webhook: {
+          enabled: true,
+          url: `${base}/webhook/whatsapp/${req.params.id}/${secret}`,
+          byEvents: false,
+          base64: false,
+          events: ['MESSAGES_UPSERT', 'CONNECTION_UPDATE'],
+        },
+      },
+    });
+    if (!hook.ok) throw Error('webhook: ' + hook.status);
+    await pool.query('UPDATE manu_whatsapp SET secret=$2,secret_next=NULL WHERE office_id=$1', [
+      req.params.id,
+      hash(secret),
+    ]);
+    const state = await evolution('/instance/connectionState/' + inst);
+    if (state.ok && waStatus(state.data?.instance?.state) === 'connected') {
+      await pool.query("UPDATE manu_whatsapp SET status='connected',updated_at=now() WHERE office_id=$1", [
+        req.params.id,
+      ]);
+      return res.json({ status: 'connected' });
+    }
+    const qr = await evolution('/instance/connect/' + inst),
+      raw = String(qr.data?.base64 || ''),
+      image = raw.startsWith('data:') ? raw : 'data:image/png;base64,' + raw;
+    if (!qr.ok || !raw || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(image)) throw Error('QR code: ' + qr.status);
+    res.json({ status: 'connecting', qr: image });
+  } catch (e) {
+    console.error('Falha ao conectar o WhatsApp:', e.message);
+    await pool.query('UPDATE manu_whatsapp SET status=$2,updated_at=now() WHERE office_id=$1', [
+      req.params.id,
+      previous,
+    ]);
+    res.status(502).json({ error: 'Não foi possível falar com o servidor do WhatsApp. Tente novamente em instantes.' });
+  }
+});
+app.post('/api/offices/:id/whatsapp/disconnect', session, owner, async (req, res) => {
+  const w = (await pool.query('SELECT instance FROM manu_whatsapp WHERE office_id=$1', [req.params.id])).rows[0];
+  if (w && evoReady()) {
+    let r;
+    try {
+      r = await evolution('/instance/logout/' + encodeURIComponent(w.instance), { method: 'DELETE' });
+    } catch (e) {
+      console.error('Falha ao desconectar o WhatsApp:', e.message);
+    }
+    if (!r || (!r.ok && ![400, 404].includes(r.status))) {
+      if (r) console.error('Falha ao desconectar o WhatsApp: Evolution respondeu', r.status);
+      return res
+        .status(502)
+        .json({
+          error: 'Não foi possível desconectar agora. O WhatsApp continua conectado. Tente novamente em instantes.',
+        });
+    }
+  }
+  await pool.query(
+    "UPDATE manu_whatsapp SET status='disconnected',phone='',secret=$2,secret_next=NULL,updated_at=now() WHERE office_id=$1",
+    [req.params.id, hash(randomBytes(32).toString('hex'))],
+  );
+  res.json({ status: 'disconnected' });
+});
 // ---- Atendimento automático por menu (plano Essencial e base do plano com IA): agenda, consulta e cancela pelo WhatsApp sem IA.
-const botSent=new Map(),botQueues=new Map(),CANCELABLE=['Agendada','Confirmada','Aguardando'],CANCEL_NOTE='Cancelado pelo paciente no WhatsApp.',WEEK=['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-export function phoneKey(p){let d=String(p||'').replace(/\D/g,'');if(d.length>=12&&d.startsWith('55'))d=d.slice(2);if(d.length===11&&d[2]==='9')d=d.slice(0,2)+d.slice(3);return d}
-const dayLabel=date=>WEEK[new Date(date+'T12:00:00Z').getUTCDay()]+' '+date.slice(8,10)+'/'+date.slice(5,7),addDays=(date,n)=>new Date(Date.parse(date+'T12:00:00Z')+n*86400000).toISOString().slice(0,10),money=v=>Number(v)>0?' · '+Number(v).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):'',numbered=list=>list.map((t,i)=>`${i+1} - ${t}`).join('\n');
-const botServices=state=>state.settings.services.filter(s=>state.settings.procedureMode!=='custom'||(state.settings.procedureIds||[]).includes(s.id));
-function botDays(profile,state,serviceId){const days=[],first=officeToday(profile);for(let i=0;i<60&&days.length<6;i++){const d=addDays(first,i);if(bookingSlots(profile,state,d,serviceId).length)days.push(d)}return days}
-const patientOf=(state,phone)=>state.patients.find(p=>phoneKey(p.phone)&&phoneKey(p.phone)===phoneKey(phone)),patientIdsOf=(state,phone)=>state.patients.filter(p=>phoneKey(p.phone)&&phoneKey(p.phone)===phoneKey(phone)).map(p=>p.id),modesOf=profile=>profile.mode==='Online'?['Online']:profile.mode==='Presencial e online'?['Presencial','Online']:['Presencial'];
-function rememberBotText(officeId,phone,text){const k=officeId+':'+phone,list=(botSent.get(k)||[]).filter(x=>Date.now()-x.at<120000);list.push({text,at:Date.now()});botSent.set(k,list)}
-function isBotEcho(officeId,phone,text){const k=officeId+':'+phone,list=(botSent.get(k)||[]).filter(x=>Date.now()-x.at<120000),i=list.findIndex(x=>x.text===text);if(i<0)return false;list.splice(i,1);botSent.set(k,list);return true}
-async function botSend(officeId,instance,phone,text){rememberBotText(officeId,phone,text);const r=await evolution('/message/sendText/'+encodeURIComponent(instance),{method:'POST',body:{number:phone,text}});if(!r.ok)throw Error('envio: '+r.status);await pool.query("INSERT INTO manu_whatsapp_messages(office_id,message_id,phone,direction,kind,text) VALUES($1,$2,$3,'bot','text',$4) ON CONFLICT(office_id,message_id) DO UPDATE SET direction='bot'",[officeId,String(r.data?.key?.id||'bot-'+randomUUID()),phone,text.slice(0,4000)])}
-const pauseBot=(officeId,phone)=>pool.query("INSERT INTO manu_whatsapp_sessions(office_id,phone,step,paused_until) VALUES($1,$2,'start',now()+make_interval(mins=>(SELECT coalesce(max(pause_minutes),120) FROM manu_whatsapp WHERE office_id=$1))) ON CONFLICT(office_id,phone) DO UPDATE SET step='start',data='{}',paused_until=EXCLUDED.paused_until,updated_at=now()",[officeId,phone]);
-function queueBot(officeId,msg){const k=officeId+':'+msg.phone,run=(botQueues.get(k)||Promise.resolve()).then(()=>botHandle(officeId,msg)).catch(e=>console.error('Falha no atendimento automático:',e.message));botQueues.set(k,run);run.then(()=>{if(botQueues.get(k)===run)botQueues.delete(k)})}
-async function botBook(officeId,phone,d){const c=await pool.connect();try{await c.query('BEGIN');await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING',[officeId,defaultState()]);const profile=(await c.query('SELECT profile FROM manu_offices WHERE id=$1 FOR UPDATE',[officeId])).rows[0]?.profile;const state=(await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE',[officeId])).rows[0]?.data;const service=state?.settings.services.find(s=>s.id===d.serviceId);if(!profile||!service||!bookingSlots(profile,state,d.date,d.serviceId).includes(d.time)){await c.query('ROLLBACK');return null}if(!modesOf(profile).includes(d.mode)){await c.query('ROLLBACK');return 'mode'}let patient=patientOf(state,phone);if(!patient){patient={id:randomUUID(),name:d.name,phone,email:''};state.patients.push(patient)}const appointment={id:randomUUID(),patient:patient.id,service:service.id,serviceName:service.name,duration:service.duration,price:service.price,date:d.date,time:d.time,status:'Agendada',mode:d.mode,note:'Agendado pelo WhatsApp.',source:'whatsapp'};state.appointments.push(appointment);if(state.patients.length>10000||state.appointments.length>20000){await c.query('ROLLBACK');return null}await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2',[state,officeId]);await c.query('COMMIT');notifyBooking(profile,appointment,patient);return appointment}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}
-async function botCancel(officeId,phone,appointmentId){const c=await pool.connect();try{await c.query('BEGIN');const profile=(await c.query('SELECT profile FROM manu_offices WHERE id=$1',[officeId])).rows[0]?.profile;const state=(await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE',[officeId])).rows[0]?.data;const ids=state?patientIdsOf(state,phone):[],a=state?.appointments.find(x=>x.id===appointmentId&&ids.includes(x.patient)&&CANCELABLE.includes(x.status)&&x.date>=officeToday(profile));if(!a){await c.query('ROLLBACK');return null}a.status='Cancelada';a.note=(a.note?a.note.slice(0,500-CANCEL_NOTE.length-1).trimEnd()+' ':'')+CANCEL_NOTE;await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2',[state,officeId]);await c.query('COMMIT');notifyBooking(profile,a,state.patients.find(p=>p.id===a.patient)||{name:'Paciente',phone},'cancel');return a}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}
-async function botConfirm(officeId,phone,appointmentId){const c=await pool.connect();try{await c.query('BEGIN');const profile=(await c.query('SELECT profile FROM manu_offices WHERE id=$1',[officeId])).rows[0]?.profile;const state=(await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE',[officeId])).rows[0]?.data;const ids=state?patientIdsOf(state,phone):[],a=state?.appointments.find(x=>x.id===appointmentId&&ids.includes(x.patient)&&['Agendada','Confirmada'].includes(x.status)&&x.date>=officeToday(profile));if(!a){await c.query('ROLLBACK');return null}if(a.status!=='Confirmada'){a.status='Confirmada';await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2',[state,officeId])}await c.query('COMMIT');return a}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}
+const botSent = new Map(),
+  botQueues = new Map(),
+  CANCELABLE = ['Agendada', 'Confirmada', 'Aguardando'],
+  CANCEL_NOTE = 'Cancelado pelo paciente no WhatsApp.',
+  WEEK = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+export function phoneKey(p) {
+  let d = String(p || '').replace(/\D/g, '');
+  if (d.length >= 12 && d.startsWith('55')) d = d.slice(2);
+  if (d.length === 11 && d[2] === '9') d = d.slice(0, 2) + d.slice(3);
+  return d;
+}
+const dayLabel = (date) =>
+    WEEK[new Date(date + 'T12:00:00Z').getUTCDay()] + ' ' + date.slice(8, 10) + '/' + date.slice(5, 7),
+  addDays = (date, n) => new Date(Date.parse(date + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10),
+  money = (v) =>
+    Number(v) > 0 ? ' · ' + Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '',
+  numbered = (list) => list.map((t, i) => `${i + 1} - ${t}`).join('\n');
+const botServices = (state) =>
+  state.settings.services.filter(
+    (s) => state.settings.procedureMode !== 'custom' || (state.settings.procedureIds || []).includes(s.id),
+  );
+function botDays(profile, state, serviceId) {
+  const days = [],
+    first = officeToday(profile);
+  for (let i = 0; i < 60 && days.length < 6; i++) {
+    const d = addDays(first, i);
+    if (bookingSlots(profile, state, d, serviceId).length) days.push(d);
+  }
+  return days;
+}
+const patientOf = (state, phone) =>
+    state.patients.find((p) => phoneKey(p.phone) && phoneKey(p.phone) === phoneKey(phone)),
+  patientIdsOf = (state, phone) =>
+    state.patients.filter((p) => phoneKey(p.phone) && phoneKey(p.phone) === phoneKey(phone)).map((p) => p.id),
+  modesOf = (profile) =>
+    profile.mode === 'Online'
+      ? ['Online']
+      : profile.mode === 'Presencial e online'
+        ? ['Presencial', 'Online']
+        : ['Presencial'];
+function rememberBotText(officeId, phone, text) {
+  const k = officeId + ':' + phone,
+    list = (botSent.get(k) || []).filter((x) => Date.now() - x.at < 120000);
+  list.push({ text, at: Date.now() });
+  botSent.set(k, list);
+}
+function isBotEcho(officeId, phone, text) {
+  const k = officeId + ':' + phone,
+    list = (botSent.get(k) || []).filter((x) => Date.now() - x.at < 120000),
+    i = list.findIndex((x) => x.text === text);
+  if (i < 0) return false;
+  list.splice(i, 1);
+  botSent.set(k, list);
+  return true;
+}
+async function botSend(officeId, instance, phone, text) {
+  rememberBotText(officeId, phone, text);
+  const r = await evolution('/message/sendText/' + encodeURIComponent(instance), {
+    method: 'POST',
+    body: { number: phone, text },
+  });
+  if (!r.ok) throw Error('envio: ' + r.status);
+  await pool.query(
+    "INSERT INTO manu_whatsapp_messages(office_id,message_id,phone,direction,kind,text) VALUES($1,$2,$3,'bot','text',$4) ON CONFLICT(office_id,message_id) DO UPDATE SET direction='bot'",
+    [officeId, String(r.data?.key?.id || 'bot-' + randomUUID()), phone, text.slice(0, 4000)],
+  );
+}
+const pauseBot = (officeId, phone) =>
+  pool.query(
+    "INSERT INTO manu_whatsapp_sessions(office_id,phone,step,paused_until) VALUES($1,$2,'start',now()+make_interval(mins=>(SELECT coalesce(max(pause_minutes),120) FROM manu_whatsapp WHERE office_id=$1))) ON CONFLICT(office_id,phone) DO UPDATE SET step='start',data='{}',paused_until=EXCLUDED.paused_until,updated_at=now()",
+    [officeId, phone],
+  );
+function queueBot(officeId, msg) {
+  const k = officeId + ':' + msg.phone,
+    run = (botQueues.get(k) || Promise.resolve())
+      .then(() => botHandle(officeId, msg))
+      .catch((e) => console.error('Falha no atendimento automático:', e.message));
+  botQueues.set(k, run);
+  run.then(() => {
+    if (botQueues.get(k) === run) botQueues.delete(k);
+  });
+}
+async function botBook(officeId, phone, d) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('INSERT INTO manu_states(office_id,data) VALUES($1,$2) ON CONFLICT DO NOTHING', [
+      officeId,
+      defaultState(),
+    ]);
+    const profile = (await c.query('SELECT profile FROM manu_offices WHERE id=$1 FOR UPDATE', [officeId])).rows[0]
+      ?.profile;
+    const state = (await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE', [officeId])).rows[0]
+      ?.data;
+    const service = state?.settings.services.find((s) => s.id === d.serviceId);
+    if (!profile || !service || !bookingSlots(profile, state, d.date, d.serviceId).includes(d.time)) {
+      await c.query('ROLLBACK');
+      return null;
+    }
+    if (!modesOf(profile).includes(d.mode)) {
+      await c.query('ROLLBACK');
+      return 'mode';
+    }
+    let patient = patientOf(state, phone);
+    if (!patient) {
+      patient = { id: randomUUID(), name: d.name, phone, email: '' };
+      state.patients.push(patient);
+    }
+    const appointment = {
+      id: randomUUID(),
+      patient: patient.id,
+      service: service.id,
+      serviceName: service.name,
+      duration: service.duration,
+      price: service.price,
+      date: d.date,
+      time: d.time,
+      status: 'Agendada',
+      mode: d.mode,
+      note: 'Agendado pelo WhatsApp.',
+      source: 'whatsapp',
+    };
+    state.appointments.push(appointment);
+    if (state.patients.length > 10000 || state.appointments.length > 20000) {
+      await c.query('ROLLBACK');
+      return null;
+    }
+    await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2', [state, officeId]);
+    await c.query('COMMIT');
+    notifyBooking(profile, appointment, patient);
+    return appointment;
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+async function botCancel(officeId, phone, appointmentId) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const profile = (await c.query('SELECT profile FROM manu_offices WHERE id=$1', [officeId])).rows[0]?.profile;
+    const state = (await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE', [officeId])).rows[0]
+      ?.data;
+    const ids = state ? patientIdsOf(state, phone) : [],
+      a = state?.appointments.find(
+        (x) =>
+          x.id === appointmentId &&
+          ids.includes(x.patient) &&
+          CANCELABLE.includes(x.status) &&
+          x.date >= officeToday(profile),
+      );
+    if (!a) {
+      await c.query('ROLLBACK');
+      return null;
+    }
+    a.status = 'Cancelada';
+    a.note = (a.note ? a.note.slice(0, 500 - CANCEL_NOTE.length - 1).trimEnd() + ' ' : '') + CANCEL_NOTE;
+    await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2', [state, officeId]);
+    await c.query('COMMIT');
+    notifyBooking(profile, a, state.patients.find((p) => p.id === a.patient) || { name: 'Paciente', phone }, 'cancel');
+    return a;
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+async function botConfirm(officeId, phone, appointmentId) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const profile = (await c.query('SELECT profile FROM manu_offices WHERE id=$1', [officeId])).rows[0]?.profile;
+    const state = (await c.query('SELECT data FROM manu_states WHERE office_id=$1 FOR UPDATE', [officeId])).rows[0]
+      ?.data;
+    const ids = state ? patientIdsOf(state, phone) : [],
+      a = state?.appointments.find(
+        (x) =>
+          x.id === appointmentId &&
+          ids.includes(x.patient) &&
+          ['Agendada', 'Confirmada'].includes(x.status) &&
+          x.date >= officeToday(profile),
+      );
+    if (!a) {
+      await c.query('ROLLBACK');
+      return null;
+    }
+    if (a.status !== 'Confirmada') {
+      a.status = 'Confirmada';
+      await c.query('UPDATE manu_states SET data=$1,version=version+1 WHERE office_id=$2', [state, officeId]);
+    }
+    await c.query('COMMIT');
+    return a;
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+}
 // Lembrete na véspera: das 9h às 20h no fuso do consultório, pelo WhatsApp conectado do consultório, uma vez por consulta.
-export async function runReminders(now=new Date()){if(!evoReady())return 0;let sent=0;const rows=(await pool.query("SELECT w.office_id,w.instance,w.bot,o.profile,s.data FROM manu_whatsapp w JOIN manu_offices o ON o.id=w.office_id JOIN manu_states s ON s.office_id=w.office_id WHERE w.status='connected' AND w.reminders")).rows;for(const r of rows){const tz=r.profile.timezone||'America/Sao_Paulo',hour=Number(now.toLocaleString('en-US',{timeZone:tz,hour:'2-digit',hourCycle:'h23'}));if(hour<9||hour>=20)continue;const tomorrow=addDays(now.toLocaleDateString('en-CA',{timeZone:tz}),1),who=[r.profile.honorific,r.profile.name].filter(Boolean).join(' ')||r.profile.office||'o consultório',done=new Set((await pool.query('SELECT appointment_id FROM manu_reminders WHERE office_id=$1',[r.office_id])).rows.map(x=>x.appointment_id)),groups=new Map();
-// já lembradas saem antes do limite; o mesmo telefone recebe uma mensagem só com todas as consultas dele
-for(const a of (r.data.appointments||[]).filter(x=>x.date===tomorrow&&['Agendada','Confirmada'].includes(x.status)&&!done.has(x.id)).sort((x,y)=>x.time.localeCompare(y.time))){const p=(r.data.patients||[]).find(x=>x.id===a.patient),phone=resetPhone(p?.phone);if(!phone)continue;const k=phoneKey(phone);if(!groups.has(k))groups.set(k,{phone,name:p.name,list:[]});groups.get(k).list.push(a)}
-for(const [k,g] of [...groups].slice(0,40)){const ask=r.bot&&g.list.some(a=>a.status==='Agendada'),ids=[];for(const a of g.list)if((await pool.query('INSERT INTO manu_reminders(office_id,appointment_id,phone_key,awaiting) VALUES($1,$2,$3,false) ON CONFLICT DO NOTHING RETURNING 1',[r.office_id,a.id,k])).rowCount)ids.push(a.id);const list=g.list.filter(a=>ids.includes(a.id));if(!list.length)continue;const many=list.length>1,local=list.some(a=>a.mode==='Presencial')&&r.profile.showAddress!=='no'&&r.profile.address?`\nEndereço: ${r.profile.address}`:'',lines=list.map(a=>`${a.time} · ${a.serviceName} · ${a.mode.toLowerCase()}`).join('\n');
-const text=`Olá, ${String(g.name||'').split(' ')[0]}! Lembrete ${many?'das suas consultas':'da sua consulta'} amanhã, ${dayLabel(tomorrow)}, com ${who}:\n${lines}${local}`+(ask?(many?'\n\nResponda:\n1 - Confirmar todas\n2 - Cancelar todas\n3 - Ver o menu':'\n\nResponda:\n1 - Confirmar presença\n2 - Cancelar'):'\n\nSe precisar remarcar, responda esta mensagem.');
-try{if(ask){await pool.query('UPDATE manu_reminders SET awaiting=false WHERE office_id=$1 AND phone_key=$2 AND awaiting',[r.office_id,k]);await pool.query('UPDATE manu_reminders SET awaiting=true,sent_at=now() WHERE office_id=$1 AND appointment_id=ANY($2)',[r.office_id,ids])}await botSend(r.office_id,r.instance,g.phone,text);sent++}catch(e){console.error('Lembrete:',e.message);await pool.query('DELETE FROM manu_reminders WHERE office_id=$1 AND appointment_id=ANY($2)',[r.office_id,ids])}if(!['test','unit-test'].includes(process.env.NODE_ENV))await new Promise(ok=>setTimeout(ok,3000))}}return sent}
-let remindersRunning=false;const reminderTick=()=>{if(remindersRunning)return;remindersRunning=true;runReminders().catch(e=>console.error('Lembretes:',e.message)).finally(()=>{remindersRunning=false})};
-async function botHandle(officeId,msg){const w=(await pool.query('SELECT instance,bot FROM manu_whatsapp WHERE office_id=$1',[officeId])).rows[0];if(!w?.bot||!evoReady())return;const s=(await pool.query("INSERT INTO manu_whatsapp_sessions(office_id,phone) VALUES($1,$2) ON CONFLICT(office_id,phone) DO UPDATE SET phone=EXCLUDED.phone RETURNING step,data,coalesce(paused_until>now(),false) AS paused,updated_at<now()-interval '30 minutes' AS expired",[officeId,msg.phone])).rows[0];if(s.paused)return;const profile=(await pool.query('SELECT profile FROM manu_offices WHERE id=$1',[officeId])).rows[0]?.profile;if(!profile)return;const state=(await pool.query('SELECT data FROM manu_states WHERE office_id=$1',[officeId])).rows[0]?.data||defaultState();
-const pend=(await pool.query("UPDATE manu_reminders SET awaiting=false WHERE office_id=$1 AND phone_key=$2 AND awaiting RETURNING appointment_id,sent_at>now()-interval '36 hours' AS fresh",[officeId,phoneKey(msg.phone)])).rows.filter(r=>r.fresh),answer=msg.text.trim();if(pend.length&&['1','2'].includes(answer)){const done=[];for(const r of pend){const a=answer==='1'?await botConfirm(officeId,msg.phone,r.appointment_id):await botCancel(officeId,msg.phone,r.appointment_id);if(a)done.push(a)}await pool.query("UPDATE manu_whatsapp_sessions SET step='start',data='{}' WHERE office_id=$1 AND phone=$2",[officeId,msg.phone]);if(!done.length)return botSend(officeId,w.instance,msg.phone,'Não encontrei essa consulta. Responda qualquer mensagem para ver o menu.');return botSend(officeId,w.instance,msg.phone,answer==='1'?(done.length>1?`Presença confirmada nas ${done.length} consultas ✅ Até amanhã!`:`Presença confirmada ✅ Até amanhã, ${dayLabel(done[0].date)} às ${done[0].time}!`):(done.length>1?`${done.length} consultas canceladas. Se quiser marcar outro horário, é só mandar uma mensagem.`:'Consulta cancelada. Se quiser marcar outro horário, é só mandar uma mensagem.'))}
-const step=s.expired?'start':s.step,data=s.expired?{}:s.data,text=msg.text.trim(),n=/^\d{1,2}$/.test(text)?Number(text):-1,who=[profile.honorific,profile.name].filter(Boolean).join(' ')||'o profissional',say=t=>botSend(officeId,w.instance,msg.phone,t),save=(st,d={})=>pool.query('UPDATE manu_whatsapp_sessions SET step=$3,data=$4,updated_at=now() WHERE office_id=$1 AND phone=$2',[officeId,msg.phone,st,d]);
-const menu=async(before='')=>{await save('menu');await say(before+`Olá! Aqui é ${profile.office||who} 😊\nResponda com o número da opção:\n\n1 - Agendar consulta\n2 - Ver ou cancelar meu horário\n3 - Falar com ${who}`+(step==='start'&&APP_BASE?`\n\nSeus dados são usados só para o seu atendimento: ${APP_BASE}/privacidade`:''))};
-const days=async serviceId=>{const list=botDays(profile,state,serviceId);if(!list.length){await save('menu');return say(`Não encontrei horários livres nos próximos dias. Responda 3 para falar com ${who}.`)}await save('day',{serviceId,days:list});await say('Escolha o dia:\n\n'+numbered(list.map(dayLabel))+'\n\n0 - Voltar ao menu')};
-const confirm=async d=>{const service=state.settings.services.find(x=>x.id===d.serviceId);await save('confirm',d);await say(`Confira o agendamento:\n\n${service?.name||'Consulta'}${money(service?.price)}\n${dayLabel(d.date)} às ${d.time}\n${d.mode}\nPaciente: ${d.name}\n\n1 - Confirmar\n2 - Escolher outro horário\n0 - Voltar ao menu`)};
-const times=async d=>{const page=d.page||0,shown=d.slots.slice(page*9,page*9+9),more=d.slots.length>page*9+9;await save('time',d);await say(`Horários livres em ${dayLabel(d.date)}${page?' (mais horários)':''}:\n\n`+numbered(shown)+(more?'\n10 - Ver mais horários':'')+'\n\n0 - Voltar ao menu')};
-const askName=async d=>{const p=patientOf(state,msg.phone);if(p)return confirm({...d,name:p.name});await save('name',d);await say('Qual o nome completo do paciente?')};
-if(!text){if(['start','menu'].includes(step))return menu('Ainda não consigo ouvir áudios nem ver imagens.\n\n');return say('Ainda não consigo ouvir áudios nem ver imagens. Responda com o número da opção 🙂')}
-if(step==='start'||['menu','0','voltar','início','inicio'].includes(text.toLowerCase()))return menu();
-if(step==='menu'){if(n===1){const list=botServices(state);if(!list.length){await save('menu');return say(`No momento não há serviços disponíveis para agendar. Responda 3 para falar com ${who}.`)}if(list.length===1)return days(list[0].id);await save('service',{ids:list.map(x=>x.id)});return say('Qual serviço?\n\n'+numbered(list.map(x=>`${x.name} (${x.duration} min)${money(x.price)}`))+'\n\n0 - Voltar ao menu')}
-if(n===2){const ids=patientIdsOf(state,msg.phone),today=officeToday(profile),mine=ids.length?state.appointments.filter(a=>ids.includes(a.patient)&&CANCELABLE.includes(a.status)&&a.date>=today).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).slice(0,9):[];if(!mine.length)return menu('Você não tem consultas marcadas.\n\n');await save('mine',{ids:mine.map(a=>a.id)});return say('Suas próximas consultas:\n\n'+numbered(mine.map(a=>`${dayLabel(a.date)} às ${a.time} · ${a.serviceName}`))+'\n\nResponda com o número para cancelar, ou 0 para voltar ao menu.')}
-if(n===3){await pauseBot(officeId,msg.phone);return say(`Certo! ${who} vai responder por aqui assim que possível.`)}return menu()}
-if(step==='service'){const id=data.ids?.[n-1];return id?days(id):say('Responda com o número do serviço, ou 0 para voltar ao menu.')}
-if(step==='day'){const date=data.days?.[n-1];if(!date)return say('Responda com o número do dia, ou 0 para voltar ao menu.');const slots=bookingSlots(profile,state,date,data.serviceId);if(!slots.length)return days(data.serviceId);return times({serviceId:data.serviceId,date,slots,page:0})}
-if(step==='time'){const page=data.page||0;if(n===10&&data.slots?.length>(page+1)*9)return times({...data,page:page+1});const time=n>=1&&n<=9?data.slots?.[page*9+n-1]:undefined;if(!time)return say('Responda com o número do horário, ou 0 para voltar ao menu.');const d={serviceId:data.serviceId,date:data.date,time},modes=modesOf(profile);if(modes.length>1){await save('mode',d);return say('Como prefere a consulta?\n\n1 - Presencial\n2 - Online')}return askName({...d,mode:modes[0]})}
-if(step==='mode'){const mode=['Presencial','Online'][n-1];return mode?askName({...data,mode}):say('Responda 1 para presencial ou 2 para online.')}
-if(step==='name'){if(text.length<3||text.length>100||!/\p{L}/u.test(text))return say('Por favor, escreva o nome completo do paciente.');return confirm({...data,name:text})}
-if(step==='confirm'){if(n===2)return days(data.serviceId);if(n!==1)return say('Responda 1 para confirmar ou 2 para escolher outro horário.');const a=await botBook(officeId,msg.phone,data);if(a==='mode'){const modes=modesOf(profile).filter(m=>m!==data.mode);await say(`A modalidade ${data.mode.toLowerCase()} não está mais disponível neste consultório.`);if(modes.length===1)return confirm({...data,mode:modes[0]});await save('mode',data);return say('Como prefere a consulta?\n\n1 - Presencial\n2 - Online')}if(!a){await say('Esse horário acabou de ser ocupado. Escolha outro, por favor.');return days(data.serviceId)}await save('start');return say(`✅ Agendado!\n\n${a.serviceName}\n${dayLabel(a.date)} às ${a.time} · ${a.mode}\n\nSe precisar ver ou cancelar, é só mandar "menu".`)}
-if(step==='mine'){const id=data.ids?.[n-1],a=state.appointments.find(x=>x.id===id);if(!a)return say('Responda com o número da consulta, ou 0 para voltar ao menu.');await save('cancel',{id});return say(`Cancelar a consulta de ${dayLabel(a.date)} às ${a.time} (${a.serviceName})?\n\n1 - Sim, cancelar\n2 - Não`)}
-if(step==='cancel'){if(n===1){const a=await botCancel(officeId,msg.phone,data.id);await save('start');return say(a?'Consulta cancelada. Se quiser marcar outro horário, é só mandar "menu".':'Não encontrei essa consulta. Mande "menu" para ver suas consultas.')}return menu()}
-return menu()}
-app.post('/api/offices/:id/whatsapp/settings',session,owner,async(req,res)=>{const {bot,pauseMinutes,reminders}=req.body||{};if((bot!==undefined&&typeof bot!=='boolean')||(reminders!==undefined&&typeof reminders!=='boolean')||(pauseMinutes!==undefined&&![30,120,720].includes(pauseMinutes))||(bot===undefined&&pauseMinutes===undefined&&reminders===undefined))return res.status(400).json({error:'Configuração inválida.'});const r=await pool.query('UPDATE manu_whatsapp SET bot=coalesce($2,bot),pause_minutes=coalesce($3,pause_minutes),reminders=coalesce($4,reminders) WHERE office_id=$1 RETURNING bot,pause_minutes,reminders',[req.params.id,bot??null,pauseMinutes??null,reminders??null]);if(!r.rowCount)return res.status(409).json({error:'Conecte o WhatsApp antes de ligar o atendimento automático.'});if(bot===true)await pool.query('UPDATE manu_whatsapp_sessions SET paused_until=NULL WHERE office_id=$1',[req.params.id]);res.json({bot:r.rows[0].bot,pauseMinutes:r.rows[0].pause_minutes,reminders:r.rows[0].reminders})});
+export async function runReminders(now = new Date()) {
+  if (!evoReady()) return 0;
+  let sent = 0;
+  const rows = (
+    await pool.query(
+      "SELECT w.office_id,w.instance,w.bot,o.profile,s.data FROM manu_whatsapp w JOIN manu_offices o ON o.id=w.office_id JOIN manu_states s ON s.office_id=w.office_id WHERE w.status='connected' AND w.reminders",
+    )
+  ).rows;
+  for (const r of rows) {
+    const tz = r.profile.timezone || 'America/Sao_Paulo',
+      hour = Number(now.toLocaleString('en-US', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }));
+    if (hour < 9 || hour >= 20) continue;
+    const tomorrow = addDays(now.toLocaleDateString('en-CA', { timeZone: tz }), 1),
+      who = [r.profile.honorific, r.profile.name].filter(Boolean).join(' ') || r.profile.office || 'o consultório',
+      done = new Set(
+        (await pool.query('SELECT appointment_id FROM manu_reminders WHERE office_id=$1', [r.office_id])).rows.map(
+          (x) => x.appointment_id,
+        ),
+      ),
+      groups = new Map();
+    // já lembradas saem antes do limite; o mesmo telefone recebe uma mensagem só com todas as consultas dele
+    for (const a of (r.data.appointments || [])
+      .filter((x) => x.date === tomorrow && ['Agendada', 'Confirmada'].includes(x.status) && !done.has(x.id))
+      .sort((x, y) => x.time.localeCompare(y.time))) {
+      const p = (r.data.patients || []).find((x) => x.id === a.patient),
+        phone = resetPhone(p?.phone);
+      if (!phone) continue;
+      const k = phoneKey(phone);
+      if (!groups.has(k)) groups.set(k, { phone, name: p.name, list: [] });
+      groups.get(k).list.push(a);
+    }
+    for (const [k, g] of [...groups].slice(0, 40)) {
+      const ask = r.bot && g.list.some((a) => a.status === 'Agendada'),
+        ids = [];
+      for (const a of g.list)
+        if (
+          (
+            await pool.query(
+              'INSERT INTO manu_reminders(office_id,appointment_id,phone_key,awaiting) VALUES($1,$2,$3,false) ON CONFLICT DO NOTHING RETURNING 1',
+              [r.office_id, a.id, k],
+            )
+          ).rowCount
+        )
+          ids.push(a.id);
+      const list = g.list.filter((a) => ids.includes(a.id));
+      if (!list.length) continue;
+      const many = list.length > 1,
+        local =
+          list.some((a) => a.mode === 'Presencial') && r.profile.showAddress !== 'no' && r.profile.address
+            ? `\nEndereço: ${r.profile.address}`
+            : '',
+        lines = list.map((a) => `${a.time} · ${a.serviceName} · ${a.mode.toLowerCase()}`).join('\n');
+      const text =
+        `Olá, ${String(g.name || '').split(' ')[0]}! Lembrete ${many ? 'das suas consultas' : 'da sua consulta'} amanhã, ${dayLabel(tomorrow)}, com ${who}:\n${lines}${local}` +
+        (ask
+          ? many
+            ? '\n\nResponda:\n1 - Confirmar todas\n2 - Cancelar todas\n3 - Ver o menu'
+            : '\n\nResponda:\n1 - Confirmar presença\n2 - Cancelar'
+          : '\n\nSe precisar remarcar, responda esta mensagem.');
+      try {
+        if (ask) {
+          await pool.query(
+            'UPDATE manu_reminders SET awaiting=false WHERE office_id=$1 AND phone_key=$2 AND awaiting',
+            [r.office_id, k],
+          );
+          await pool.query(
+            'UPDATE manu_reminders SET awaiting=true,sent_at=now() WHERE office_id=$1 AND appointment_id=ANY($2)',
+            [r.office_id, ids],
+          );
+        }
+        await botSend(r.office_id, r.instance, g.phone, text);
+        sent++;
+      } catch (e) {
+        console.error('Lembrete:', e.message);
+        await pool.query('DELETE FROM manu_reminders WHERE office_id=$1 AND appointment_id=ANY($2)', [
+          r.office_id,
+          ids,
+        ]);
+      }
+      if (!['test', 'unit-test'].includes(process.env.NODE_ENV)) await new Promise((ok) => setTimeout(ok, 3000));
+    }
+  }
+  return sent;
+}
+let remindersRunning = false;
+const reminderTick = () => {
+  if (remindersRunning) return;
+  remindersRunning = true;
+  runReminders()
+    .catch((e) => console.error('Lembretes:', e.message))
+    .finally(() => {
+      remindersRunning = false;
+    });
+};
+async function botHandle(officeId, msg) {
+  const w = (await pool.query('SELECT instance,bot FROM manu_whatsapp WHERE office_id=$1', [officeId])).rows[0];
+  if (!w?.bot || !evoReady()) return;
+  const s = (
+    await pool.query(
+      "INSERT INTO manu_whatsapp_sessions(office_id,phone) VALUES($1,$2) ON CONFLICT(office_id,phone) DO UPDATE SET phone=EXCLUDED.phone RETURNING step,data,coalesce(paused_until>now(),false) AS paused,updated_at<now()-interval '30 minutes' AS expired",
+      [officeId, msg.phone],
+    )
+  ).rows[0];
+  if (s.paused) return;
+  const profile = (await pool.query('SELECT profile FROM manu_offices WHERE id=$1', [officeId])).rows[0]?.profile;
+  if (!profile) return;
+  const state =
+    (await pool.query('SELECT data FROM manu_states WHERE office_id=$1', [officeId])).rows[0]?.data || defaultState();
+  const pend = (
+      await pool.query(
+        "UPDATE manu_reminders SET awaiting=false WHERE office_id=$1 AND phone_key=$2 AND awaiting RETURNING appointment_id,sent_at>now()-interval '36 hours' AS fresh",
+        [officeId, phoneKey(msg.phone)],
+      )
+    ).rows.filter((r) => r.fresh),
+    answer = msg.text.trim();
+  if (pend.length && ['1', '2'].includes(answer)) {
+    const done = [];
+    for (const r of pend) {
+      const a =
+        answer === '1'
+          ? await botConfirm(officeId, msg.phone, r.appointment_id)
+          : await botCancel(officeId, msg.phone, r.appointment_id);
+      if (a) done.push(a);
+    }
+    await pool.query("UPDATE manu_whatsapp_sessions SET step='start',data='{}' WHERE office_id=$1 AND phone=$2", [
+      officeId,
+      msg.phone,
+    ]);
+    if (!done.length)
+      return botSend(
+        officeId,
+        w.instance,
+        msg.phone,
+        'Não encontrei essa consulta. Responda qualquer mensagem para ver o menu.',
+      );
+    return botSend(
+      officeId,
+      w.instance,
+      msg.phone,
+      answer === '1'
+        ? done.length > 1
+          ? `Presença confirmada nas ${done.length} consultas ✅ Até amanhã!`
+          : `Presença confirmada ✅ Até amanhã, ${dayLabel(done[0].date)} às ${done[0].time}!`
+        : done.length > 1
+          ? `${done.length} consultas canceladas. Se quiser marcar outro horário, é só mandar uma mensagem.`
+          : 'Consulta cancelada. Se quiser marcar outro horário, é só mandar uma mensagem.',
+    );
+  }
+  const step = s.expired ? 'start' : s.step,
+    data = s.expired ? {} : s.data,
+    text = msg.text.trim(),
+    n = /^\d{1,2}$/.test(text) ? Number(text) : -1,
+    who = [profile.honorific, profile.name].filter(Boolean).join(' ') || 'o profissional',
+    say = (t) => botSend(officeId, w.instance, msg.phone, t),
+    save = (st, d = {}) =>
+      pool.query('UPDATE manu_whatsapp_sessions SET step=$3,data=$4,updated_at=now() WHERE office_id=$1 AND phone=$2', [
+        officeId,
+        msg.phone,
+        st,
+        d,
+      ]);
+  const menu = async (before = '') => {
+    await save('menu');
+    await say(
+      before +
+        `Olá! Aqui é ${profile.office || who} 😊\nResponda com o número da opção:\n\n1 - Agendar consulta\n2 - Ver ou cancelar meu horário\n3 - Falar com ${who}` +
+        (step === 'start' && APP_BASE
+          ? `\n\nSeus dados são usados só para o seu atendimento: ${APP_BASE}/privacidade`
+          : ''),
+    );
+  };
+  const days = async (serviceId) => {
+    const list = botDays(profile, state, serviceId);
+    if (!list.length) {
+      await save('menu');
+      return say(`Não encontrei horários livres nos próximos dias. Responda 3 para falar com ${who}.`);
+    }
+    await save('day', { serviceId, days: list });
+    await say('Escolha o dia:\n\n' + numbered(list.map(dayLabel)) + '\n\n0 - Voltar ao menu');
+  };
+  const confirm = async (d) => {
+    const service = state.settings.services.find((x) => x.id === d.serviceId);
+    await save('confirm', d);
+    await say(
+      `Confira o agendamento:\n\n${service?.name || 'Consulta'}${money(service?.price)}\n${dayLabel(d.date)} às ${d.time}\n${d.mode}\nPaciente: ${d.name}\n\n1 - Confirmar\n2 - Escolher outro horário\n0 - Voltar ao menu`,
+    );
+  };
+  const times = async (d) => {
+    const page = d.page || 0,
+      shown = d.slots.slice(page * 9, page * 9 + 9),
+      more = d.slots.length > page * 9 + 9;
+    await save('time', d);
+    await say(
+      `Horários livres em ${dayLabel(d.date)}${page ? ' (mais horários)' : ''}:\n\n` +
+        numbered(shown) +
+        (more ? '\n10 - Ver mais horários' : '') +
+        '\n\n0 - Voltar ao menu',
+    );
+  };
+  const askName = async (d) => {
+    const p = patientOf(state, msg.phone);
+    if (p) return confirm({ ...d, name: p.name });
+    await save('name', d);
+    await say('Qual o nome completo do paciente?');
+  };
+  if (!text) {
+    if (['start', 'menu'].includes(step)) return menu('Ainda não consigo ouvir áudios nem ver imagens.\n\n');
+    return say('Ainda não consigo ouvir áudios nem ver imagens. Responda com o número da opção 🙂');
+  }
+  if (step === 'start' || ['menu', '0', 'voltar', 'início', 'inicio'].includes(text.toLowerCase())) return menu();
+  if (step === 'menu') {
+    if (n === 1) {
+      const list = botServices(state);
+      if (!list.length) {
+        await save('menu');
+        return say(`No momento não há serviços disponíveis para agendar. Responda 3 para falar com ${who}.`);
+      }
+      if (list.length === 1) return days(list[0].id);
+      await save('service', { ids: list.map((x) => x.id) });
+      return say(
+        'Qual serviço?\n\n' +
+          numbered(list.map((x) => `${x.name} (${x.duration} min)${money(x.price)}`)) +
+          '\n\n0 - Voltar ao menu',
+      );
+    }
+    if (n === 2) {
+      const ids = patientIdsOf(state, msg.phone),
+        today = officeToday(profile),
+        mine = ids.length
+          ? state.appointments
+              .filter((a) => ids.includes(a.patient) && CANCELABLE.includes(a.status) && a.date >= today)
+              .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
+              .slice(0, 9)
+          : [];
+      if (!mine.length) return menu('Você não tem consultas marcadas.\n\n');
+      await save('mine', { ids: mine.map((a) => a.id) });
+      return say(
+        'Suas próximas consultas:\n\n' +
+          numbered(mine.map((a) => `${dayLabel(a.date)} às ${a.time} · ${a.serviceName}`)) +
+          '\n\nResponda com o número para cancelar, ou 0 para voltar ao menu.',
+      );
+    }
+    if (n === 3) {
+      await pauseBot(officeId, msg.phone);
+      return say(`Certo! ${who} vai responder por aqui assim que possível.`);
+    }
+    return menu();
+  }
+  if (step === 'service') {
+    const id = data.ids?.[n - 1];
+    return id ? days(id) : say('Responda com o número do serviço, ou 0 para voltar ao menu.');
+  }
+  if (step === 'day') {
+    const date = data.days?.[n - 1];
+    if (!date) return say('Responda com o número do dia, ou 0 para voltar ao menu.');
+    const slots = bookingSlots(profile, state, date, data.serviceId);
+    if (!slots.length) return days(data.serviceId);
+    return times({ serviceId: data.serviceId, date, slots, page: 0 });
+  }
+  if (step === 'time') {
+    const page = data.page || 0;
+    if (n === 10 && data.slots?.length > (page + 1) * 9) return times({ ...data, page: page + 1 });
+    const time = n >= 1 && n <= 9 ? data.slots?.[page * 9 + n - 1] : undefined;
+    if (!time) return say('Responda com o número do horário, ou 0 para voltar ao menu.');
+    const d = { serviceId: data.serviceId, date: data.date, time },
+      modes = modesOf(profile);
+    if (modes.length > 1) {
+      await save('mode', d);
+      return say('Como prefere a consulta?\n\n1 - Presencial\n2 - Online');
+    }
+    return askName({ ...d, mode: modes[0] });
+  }
+  if (step === 'mode') {
+    const mode = ['Presencial', 'Online'][n - 1];
+    return mode ? askName({ ...data, mode }) : say('Responda 1 para presencial ou 2 para online.');
+  }
+  if (step === 'name') {
+    if (text.length < 3 || text.length > 100 || !/\p{L}/u.test(text))
+      return say('Por favor, escreva o nome completo do paciente.');
+    return confirm({ ...data, name: text });
+  }
+  if (step === 'confirm') {
+    if (n === 2) return days(data.serviceId);
+    if (n !== 1) return say('Responda 1 para confirmar ou 2 para escolher outro horário.');
+    const a = await botBook(officeId, msg.phone, data);
+    if (a === 'mode') {
+      const modes = modesOf(profile).filter((m) => m !== data.mode);
+      await say(`A modalidade ${data.mode.toLowerCase()} não está mais disponível neste consultório.`);
+      if (modes.length === 1) return confirm({ ...data, mode: modes[0] });
+      await save('mode', data);
+      return say('Como prefere a consulta?\n\n1 - Presencial\n2 - Online');
+    }
+    if (!a) {
+      await say('Esse horário acabou de ser ocupado. Escolha outro, por favor.');
+      return days(data.serviceId);
+    }
+    await save('start');
+    return say(
+      `✅ Agendado!\n\n${a.serviceName}\n${dayLabel(a.date)} às ${a.time} · ${a.mode}\n\nSe precisar ver ou cancelar, é só mandar "menu".`,
+    );
+  }
+  if (step === 'mine') {
+    const id = data.ids?.[n - 1],
+      a = state.appointments.find((x) => x.id === id);
+    if (!a) return say('Responda com o número da consulta, ou 0 para voltar ao menu.');
+    await save('cancel', { id });
+    return say(
+      `Cancelar a consulta de ${dayLabel(a.date)} às ${a.time} (${a.serviceName})?\n\n1 - Sim, cancelar\n2 - Não`,
+    );
+  }
+  if (step === 'cancel') {
+    if (n === 1) {
+      const a = await botCancel(officeId, msg.phone, data.id);
+      await save('start');
+      return say(
+        a
+          ? 'Consulta cancelada. Se quiser marcar outro horário, é só mandar "menu".'
+          : 'Não encontrei essa consulta. Mande "menu" para ver suas consultas.',
+      );
+    }
+    return menu();
+  }
+  return menu();
+}
+app.post('/api/offices/:id/whatsapp/settings', session, owner, async (req, res) => {
+  const { bot, pauseMinutes, reminders } = req.body || {};
+  if (
+    (bot !== undefined && typeof bot !== 'boolean') ||
+    (reminders !== undefined && typeof reminders !== 'boolean') ||
+    (pauseMinutes !== undefined && ![30, 120, 720].includes(pauseMinutes)) ||
+    (bot === undefined && pauseMinutes === undefined && reminders === undefined)
+  )
+    return res.status(400).json({ error: 'Configuração inválida.' });
+  const r = await pool.query(
+    'UPDATE manu_whatsapp SET bot=coalesce($2,bot),pause_minutes=coalesce($3,pause_minutes),reminders=coalesce($4,reminders) WHERE office_id=$1 RETURNING bot,pause_minutes,reminders',
+    [req.params.id, bot ?? null, pauseMinutes ?? null, reminders ?? null],
+  );
+  if (!r.rowCount)
+    return res.status(409).json({ error: 'Conecte o WhatsApp antes de ligar o atendimento automático.' });
+  if (bot === true)
+    await pool.query('UPDATE manu_whatsapp_sessions SET paused_until=NULL WHERE office_id=$1', [req.params.id]);
+  res.json({ bot: r.rows[0].bot, pauseMinutes: r.rows[0].pause_minutes, reminders: r.rows[0].reminders });
+});
 // ---- Termos de uso e Política de privacidade (textos em legal/, dados do responsável vêm do ambiente)
-const TERMS_VERSION='2026-11-09',APP_BASE=(process.env.APP_URL||'').replace(/\/+$/,''),htmlEsc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-export function legalPage(template,env=process.env){const pending='<span class="legal-pending">a informar</span>',name=env.LEGAL_NAME?htmlEsc(env.LEGAL_NAME):pending,doc=env.LEGAL_DOC?', '+htmlEsc(env.LEGAL_DOC):'',email=env.LEGAL_EMAIL?`<a href="mailto:${htmlEsc(env.LEGAL_EMAIL)}">${htmlEsc(env.LEGAL_EMAIL)}</a>`:pending,city=env.LEGAL_CITY?`, e fica eleito o foro da comarca de ${htmlEsc(env.LEGAL_CITY)}, salvo direito do consumidor de escolher o próprio domicílio`:'',[y,m,d]=TERMS_VERSION.split('-');return template.replaceAll('{{VERSAO_DATA}}',`${d}/${m}/${y}`).replaceAll('{{RESPONSAVEL}}',name).replaceAll('{{DOCUMENTO}}',doc).replaceAll('{{CONTATO}}','escreva para '+email+'.').replaceAll('{{CONTATO_CURTO}}','pelo e-mail '+email).replaceAll('{{FORO}}',city)}
-const legalTemplates={termos:fs.readFileSync(new URL('./legal/termos.html',import.meta.url),'utf8'),privacidade:fs.readFileSync(new URL('./legal/privacidade.html',import.meta.url),'utf8')};
-for(const name of Object.keys(legalTemplates))app.get(['/'+name,'/'+name+'.html'],(req,res)=>res.set('Cache-Control','no-cache').type('html').send(legalPage(legalTemplates[name])));
+const TERMS_VERSION = '2026-11-09',
+  APP_BASE = (process.env.APP_URL || '').replace(/\/+$/, ''),
+  htmlEsc = (v) =>
+    String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+export function legalPage(template, env = process.env) {
+  const pending = '<span class="legal-pending">a informar</span>',
+    name = env.LEGAL_NAME ? htmlEsc(env.LEGAL_NAME) : pending,
+    doc = env.LEGAL_DOC ? ', ' + htmlEsc(env.LEGAL_DOC) : '',
+    email = env.LEGAL_EMAIL ? `<a href="mailto:${htmlEsc(env.LEGAL_EMAIL)}">${htmlEsc(env.LEGAL_EMAIL)}</a>` : pending,
+    city = env.LEGAL_CITY
+      ? `, e fica eleito o foro da comarca de ${htmlEsc(env.LEGAL_CITY)}, salvo direito do consumidor de escolher o próprio domicílio`
+      : '',
+    [y, m, d] = TERMS_VERSION.split('-');
+  return template
+    .replaceAll('{{VERSAO_DATA}}', `${d}/${m}/${y}`)
+    .replaceAll('{{RESPONSAVEL}}', name)
+    .replaceAll('{{DOCUMENTO}}', doc)
+    .replaceAll('{{CONTATO}}', 'escreva para ' + email + '.')
+    .replaceAll('{{CONTATO_CURTO}}', 'pelo e-mail ' + email)
+    .replaceAll('{{FORO}}', city);
+}
+const legalTemplates = {
+  termos: fs.readFileSync(new URL('./legal/termos.html', import.meta.url), 'utf8'),
+  privacidade: fs.readFileSync(new URL('./legal/privacidade.html', import.meta.url), 'utf8'),
+};
+for (const name of Object.keys(legalTemplates))
+  app.get(['/' + name, '/' + name + '.html'], (req, res) =>
+    res.set('Cache-Control', 'no-cache').type('html').send(legalPage(legalTemplates[name])),
+  );
 // ---- Recuperar senha pelo WhatsApp: código de 6 números enviado pelo número da plataforma (EVOLUTION_INSTANCE) ao WhatsApp do consultório
-const RESET_GENERIC='Se o e-mail estiver cadastrado, enviamos um código de 6 números para o WhatsApp do consultório. Ele vale por 15 minutos.';
+const RESET_GENERIC =
+  'Se o e-mail estiver cadastrado, enviamos um código de 6 números para o WhatsApp do consultório. Ele vale por 15 minutos.';
 // Aviso de novo agendamento: sai do número da plataforma (EVOLUTION_INSTANCE) para o WhatsApp do consultório.
-const fmtPhone=d=>{d=String(d||'').replace(/\D/g,'');if(d.length>11&&d.startsWith('55'))d=d.slice(2);return d.length===11?`(${d.slice(0,2)}) ${d.slice(2,7)}-${d.slice(7)}`:d.length===10?`(${d.slice(0,2)}) ${d.slice(2,6)}-${d.slice(6)}`:d};
-export function bookingNotice(a,patient,kind){const dia=new Date(a.date+'T12:00:00Z').toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'2-digit',timeZone:'UTC'});if(kind==='cancel')return `Manu Saúde: consulta cancelada pelo paciente ❌\n\nPaciente: ${patient.name}\nWhatsApp: ${fmtPhone(patient.phone)}\nServiço: ${a.serviceName}\nEra: ${dia} às ${a.time}\n\nO horário ficou livre na sua agenda.`;return `Manu Saúde: novo agendamento 📅\n\nPaciente: ${patient.name}\nWhatsApp: ${fmtPhone(patient.phone)}\nServiço: ${a.serviceName}\nQuando: ${dia} às ${a.time} (${a.mode.toLowerCase()})\n\n${a.source==='whatsapp'?'Marcado pelo menu do WhatsApp. Já está na sua agenda.':'Pedido feito pela sua página. Confirme no painel, em Minha agenda.'}`}
-function notifyBooking(profile,a,patient,kind){const phone=resetPhone(profile?.whatsapp||profile?.phone),instance=process.env.EVOLUTION_INSTANCE||'';if(!phone||!instance||!evoReady())return;evolution('/message/sendText/'+encodeURIComponent(instance),{method:'POST',body:{number:phone,text:bookingNotice(a,patient,kind)}}).then(r=>{if(!r.ok)console.error('Aviso de agendamento: a Evolution respondeu',r.status)}).catch(e=>console.error('Aviso de agendamento:',e.message))}
-export function resetPhone(p){let d=String(p||'').replace(/\D/g,'');if(d.length===10||d.length===11)d='55'+d;return /^\d{12,15}$/.test(d)?d:''}
-app.post('/api/auth/forgot',throttle,async(req,res)=>{const email=emailOf(req.body||{});const support=process.env.LEGAL_EMAIL?` Se não chegar em alguns minutos, escreva para ${process.env.LEGAL_EMAIL}.`:'';res.json({ok:true,message:RESET_GENERIC+support});if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return;try{const u=(await pool.query('SELECT id FROM manu_users WHERE email=$1',[email])).rows[0];if(!u)return;const office=(await pool.query('SELECT profile FROM manu_offices WHERE owner_id=$1 ORDER BY version DESC',[u.id])).rows.map(r=>r.profile).find(p=>resetPhone(p.whatsapp||p.phone));const phone=office&&resetPhone(office.whatsapp||office.phone),instance=process.env.EVOLUTION_INSTANCE||'';if(!phone||!instance||!evoReady()){console.error('Recuperar senha: sem WhatsApp do consultório ou sem EVOLUTION_INSTANCE para a conta',u.id);return}const code=String(randomInt(0,1000000)).padStart(6,'0');const saved=await pool.query("INSERT INTO manu_password_resets(user_id,code_hash,expires_at) VALUES($1,$2,now()+interval '15 minutes') ON CONFLICT(user_id) DO UPDATE SET code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,attempts=0,created_at=now() WHERE manu_password_resets.created_at<=now()-interval '60 seconds' RETURNING user_id",[u.id,hash(u.id+':'+code)]);if(!saved.rowCount)return;const r=await evolution('/message/sendText/'+encodeURIComponent(instance),{method:'POST',body:{number:phone,text:`Manu Saúde: seu código para criar uma nova senha é ${code}. Ele vale por 15 minutos.\n\nSe não foi você que pediu, ignore esta mensagem. Ninguém da Manu Saúde vai pedir esse código.`}});if(!r.ok)console.error('Recuperar senha: a Evolution respondeu',r.status)}catch(e){console.error('Recuperar senha:',e.message)}});
-app.post('/api/auth/reset',throttle,async(req,res)=>{const email=emailOf(req.body||{}),code=String(req.body?.code||'').replace(/\D/g,''),password=req.body?.password,invalid=()=>res.status(400).json({error:'Código inválido ou vencido. Peça um novo código.'});if(typeof password!=='string'||password.length<10||password.length>128)return res.status(400).json({error:'Escolha uma senha de 10 a 128 caracteres.'});if(code.length!==6)return invalid();const c=await pool.connect();try{await c.query('BEGIN');const u=(await c.query('SELECT id,email,name FROM manu_users WHERE email=$1',[email])).rows[0];const r=u&&(await c.query('SELECT code_hash,attempts,expires_at>now() AS valid FROM manu_password_resets WHERE user_id=$1 FOR UPDATE',[u.id])).rows[0];if(!r||!r.valid||r.attempts>=5){await c.query('ROLLBACK');return invalid()}if(!timingSafeEqual(Buffer.from(r.code_hash,'hex'),Buffer.from(hash(u.id+':'+code),'hex'))){await c.query('UPDATE manu_password_resets SET attempts=attempts+1 WHERE user_id=$1',[u.id]);await c.query('COMMIT');return invalid()}const salt=randomBytes(16).toString('hex'),key=await scrypt(password,salt,64);await c.query('UPDATE manu_users SET password=$2 WHERE id=$1',[u.id,salt+':'+key.toString('hex')]);await c.query('DELETE FROM manu_password_resets WHERE user_id=$1',[u.id]);await c.query('DELETE FROM manu_sessions WHERE user_id=$1',[u.id]);await c.query('COMMIT');await createSession(res,{id:u.id,email:u.email,name:u.name},req);res.json({ok:true})}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}});
-app.get('/healthz',async(req,res)=>{await pool.query('SELECT 1');res.type('text').send('ok\n')});
-app.use('/images',express.static(new URL('./public/images/',import.meta.url).pathname,{etag:true,maxAge:'7d'}));app.use(express.static(new URL('./public/',import.meta.url).pathname,{etag:true,maxAge:0}));
-app.use('/api',(req,res)=>res.status(404).json({error:'Recurso não encontrado.'}));
-app.use((err,req,res,next)=>{const status=err.type==='entity.too.large'?413:err instanceof SyntaxError?400:503;res.status(status).json({error:status===413?'Dados muito grandes. Reduza as imagens.':status===400?'Solicitação inválida.':'Não foi possível acessar o serviço. Tente novamente em instantes.'})});
-if(process.env.NODE_ENV!=='unit-test'){try{await db();app.listen(port,'0.0.0.0',()=>console.log('Manu Saúde disponível na porta '+port));setInterval(reminderTick,10*60*1000).unref();setTimeout(reminderTick,60*1000).unref();}catch(e){console.error('Não foi possível iniciar o banco. Confira PGHOST, PGPORT, PGDATABASE, PGUSER e PGPASSWORD no ambiente.');process.exit(1)}}
-export {app,pool,profileInput,db};
+const fmtPhone = (d) => {
+  d = String(d || '').replace(/\D/g, '');
+  if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+  return d.length === 11
+    ? `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`
+    : d.length === 10
+      ? `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`
+      : d;
+};
+export function bookingNotice(a, patient, kind) {
+  const dia = new Date(a.date + 'T12:00:00Z').toLocaleDateString('pt-BR', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    timeZone: 'UTC',
+  });
+  if (kind === 'cancel')
+    return `Manu Saúde: consulta cancelada pelo paciente ❌\n\nPaciente: ${patient.name}\nWhatsApp: ${fmtPhone(patient.phone)}\nServiço: ${a.serviceName}\nEra: ${dia} às ${a.time}\n\nO horário ficou livre na sua agenda.`;
+  return `Manu Saúde: novo agendamento 📅\n\nPaciente: ${patient.name}\nWhatsApp: ${fmtPhone(patient.phone)}\nServiço: ${a.serviceName}\nQuando: ${dia} às ${a.time} (${a.mode.toLowerCase()})\n\n${a.source === 'whatsapp' ? 'Marcado pelo menu do WhatsApp. Já está na sua agenda.' : 'Pedido feito pela sua página. Confirme no painel, em Minha agenda.'}`;
+}
+function notifyBooking(profile, a, patient, kind) {
+  const phone = resetPhone(profile?.whatsapp || profile?.phone),
+    instance = process.env.EVOLUTION_INSTANCE || '';
+  if (!phone || !instance || !evoReady()) return;
+  evolution('/message/sendText/' + encodeURIComponent(instance), {
+    method: 'POST',
+    body: { number: phone, text: bookingNotice(a, patient, kind) },
+  })
+    .then((r) => {
+      if (!r.ok) console.error('Aviso de agendamento: a Evolution respondeu', r.status);
+    })
+    .catch((e) => console.error('Aviso de agendamento:', e.message));
+}
+export function resetPhone(p) {
+  let d = String(p || '').replace(/\D/g, '');
+  if (d.length === 10 || d.length === 11) d = '55' + d;
+  return /^\d{12,15}$/.test(d) ? d : '';
+}
+app.post('/api/auth/forgot', throttle, async (req, res) => {
+  const email = emailOf(req.body || {});
+  const support = process.env.LEGAL_EMAIL
+    ? ` Se não chegar em alguns minutos, escreva para ${process.env.LEGAL_EMAIL}.`
+    : '';
+  res.json({ ok: true, message: RESET_GENERIC + support });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+  try {
+    const u = (await pool.query('SELECT id FROM manu_users WHERE email=$1', [email])).rows[0];
+    if (!u) return;
+    const office = (
+      await pool.query('SELECT profile FROM manu_offices WHERE owner_id=$1 ORDER BY version DESC', [u.id])
+    ).rows
+      .map((r) => r.profile)
+      .find((p) => resetPhone(p.whatsapp || p.phone));
+    const phone = office && resetPhone(office.whatsapp || office.phone),
+      instance = process.env.EVOLUTION_INSTANCE || '';
+    if (!phone || !instance || !evoReady()) {
+      console.error('Recuperar senha: sem WhatsApp do consultório ou sem EVOLUTION_INSTANCE para a conta', u.id);
+      return;
+    }
+    const code = String(randomInt(0, 1000000)).padStart(6, '0');
+    const saved = await pool.query(
+      "INSERT INTO manu_password_resets(user_id,code_hash,expires_at) VALUES($1,$2,now()+interval '15 minutes') ON CONFLICT(user_id) DO UPDATE SET code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,attempts=0,created_at=now() WHERE manu_password_resets.created_at<=now()-interval '60 seconds' RETURNING user_id",
+      [u.id, hash(u.id + ':' + code)],
+    );
+    if (!saved.rowCount) return;
+    const r = await evolution('/message/sendText/' + encodeURIComponent(instance), {
+      method: 'POST',
+      body: {
+        number: phone,
+        text: `Manu Saúde: seu código para criar uma nova senha é ${code}. Ele vale por 15 minutos.\n\nSe não foi você que pediu, ignore esta mensagem. Ninguém da Manu Saúde vai pedir esse código.`,
+      },
+    });
+    if (!r.ok) console.error('Recuperar senha: a Evolution respondeu', r.status);
+  } catch (e) {
+    console.error('Recuperar senha:', e.message);
+  }
+});
+app.post('/api/auth/reset', throttle, async (req, res) => {
+  const email = emailOf(req.body || {}),
+    code = String(req.body?.code || '').replace(/\D/g, ''),
+    password = req.body?.password,
+    invalid = () => res.status(400).json({ error: 'Código inválido ou vencido. Peça um novo código.' });
+  if (typeof password !== 'string' || password.length < 10 || password.length > 128)
+    return res.status(400).json({ error: 'Escolha uma senha de 10 a 128 caracteres.' });
+  if (code.length !== 6) return invalid();
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const u = (await c.query('SELECT id,email,name FROM manu_users WHERE email=$1', [email])).rows[0];
+    const r =
+      u &&
+      (
+        await c.query(
+          'SELECT code_hash,attempts,expires_at>now() AS valid FROM manu_password_resets WHERE user_id=$1 FOR UPDATE',
+          [u.id],
+        )
+      ).rows[0];
+    if (!r || !r.valid || r.attempts >= 5) {
+      await c.query('ROLLBACK');
+      return invalid();
+    }
+    if (!timingSafeEqual(Buffer.from(r.code_hash, 'hex'), Buffer.from(hash(u.id + ':' + code), 'hex'))) {
+      await c.query('UPDATE manu_password_resets SET attempts=attempts+1 WHERE user_id=$1', [u.id]);
+      await c.query('COMMIT');
+      return invalid();
+    }
+    const salt = randomBytes(16).toString('hex'),
+      key = await scrypt(password, salt, 64);
+    await c.query('UPDATE manu_users SET password=$2 WHERE id=$1', [u.id, salt + ':' + key.toString('hex')]);
+    await c.query('DELETE FROM manu_password_resets WHERE user_id=$1', [u.id]);
+    await c.query('DELETE FROM manu_sessions WHERE user_id=$1', [u.id]);
+    await c.query('COMMIT');
+    await createSession(res, { id: u.id, email: u.email, name: u.name }, req);
+    res.json({ ok: true });
+  } catch (e) {
+    await c.query('ROLLBACK');
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+app.get('/healthz', async (req, res) => {
+  await pool.query('SELECT 1');
+  res.type('text').send('ok\n');
+});
+app.use('/images', express.static(new URL('./public/images/', import.meta.url).pathname, { etag: true, maxAge: '7d' }));
+app.use(express.static(new URL('./public/', import.meta.url).pathname, { etag: true, maxAge: 0 }));
+app.use('/api', (req, res) => res.status(404).json({ error: 'Recurso não encontrado.' }));
+app.use((err, req, res, next) => {
+  const status = err.type === 'entity.too.large' ? 413 : err instanceof SyntaxError ? 400 : 503;
+  res
+    .status(status)
+    .json({
+      error:
+        status === 413
+          ? 'Dados muito grandes. Reduza as imagens.'
+          : status === 400
+            ? 'Solicitação inválida.'
+            : 'Não foi possível acessar o serviço. Tente novamente em instantes.',
+    });
+});
+if (process.env.NODE_ENV !== 'unit-test') {
+  try {
+    await db();
+    app.listen(port, '0.0.0.0', () => console.log('Manu Saúde disponível na porta ' + port));
+    setInterval(reminderTick, 10 * 60 * 1000).unref();
+    setTimeout(reminderTick, 60 * 1000).unref();
+  } catch (e) {
+    console.error(
+      'Não foi possível iniciar o banco. Confira PGHOST, PGPORT, PGDATABASE, PGUSER e PGPASSWORD no ambiente.',
+    );
+    process.exit(1);
+  }
+}
+export { app, pool, profileInput, db };
