@@ -5,3 +5,4 @@ node_modules
 .env.*
 *.tar.gz
 README.md
+.claude
