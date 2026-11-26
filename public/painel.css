@@ -121,3 +121,16 @@ main>header>div:first-child{flex:1;min-width:0}
 /* Calendário mensal no celular e no tablet: tinha largura máxima de 320px, então ficava mais estreito que os
    outros cartões (sobra de 40px num celular de 390px e metade da largura no tablet). Agora ocupa o espaço do cartão. */
 @media(max-width:1000px){.dashboard-right>.compact-calendar,.compact-calendar{max-width:none}}
+
+/* Movimento (habilidades animate / emil-design-eng). Janelas: leve zoom ao abrir e ao fechar; aviso do rodapé: leve deslize.
+   Com "reduzir movimento" ligado, fica só o esmaecimento. */
+dialog{opacity:0;transition:opacity 200ms cubic-bezier(.23,1,.32,1),transform 200ms cubic-bezier(.23,1,.32,1),overlay 200ms allow-discrete,display 200ms allow-discrete}
+dialog[open]{opacity:1}
+@starting-style{dialog[open]{opacity:0}}
+dialog::backdrop{opacity:0;transition:opacity 200ms cubic-bezier(.23,1,.32,1),overlay 200ms allow-discrete,display 200ms allow-discrete}
+dialog[open]::backdrop{opacity:1}
+@starting-style{dialog[open]::backdrop{opacity:0}}
+#toast{transition:opacity 220ms cubic-bezier(.23,1,.32,1),transform 220ms cubic-bezier(.23,1,.32,1)}
+@starting-style{#toast{opacity:0;transform:translate(-50%,10px)}}
+@media(prefers-reduced-motion:no-preference){dialog{transform:scale(.96)}dialog[open]{transform:none}@starting-style{dialog[open]{transform:scale(.96)}}}
+@media(prefers-reduced-motion:reduce){@starting-style{#toast{transform:translateX(-50%)}}}
