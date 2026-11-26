@@ -25,3 +25,11 @@ assert(block,'regra do cabeçalho para até 700px');
 assert.match(block[0],/main>header\{[^}]*height:auto/,'cabeçalho sem altura fixa');
 const js=await (await fetch(base+'/painel.js')).text();
 assert.match(js,/<span class="avatar" title="\$\{esc\(office\.name\)\}">/,'sigla com o nome completo no title')});
+
+// Com o gráfico estreito (celular, dois painéis lado a lado), "SEG TER QUA…" se sobrepunham.
+test('Celular: dias da semana do gráfico viram letras únicas quando o gráfico é estreito',async()=>{
+const text=await css('/painel.css');
+assert.match(text,/\.weekday-chart\{container-type:inline-size\}/,'o gráfico é um container');
+assert.match(text,/@container \(max-width:259px\)\{\.weekday-bar \.wd-long\{display:none\}\.weekday-bar \.wd-short\{display:inline\}\}/,'abaixo de 260px usa as letras');
+const js=await (await fetch(base+'/painel.js')).text();
+assert.match(js,/<span class="wd-long">\$\{\['SEG'.*<span class="wd-short" aria-hidden="true">\$\{'STQQSSD'\[i\]\}/,'rótulo longo e curto, com o curto escondido de leitores de tela')});

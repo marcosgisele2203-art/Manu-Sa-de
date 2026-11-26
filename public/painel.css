@@ -100,3 +100,9 @@ main>header{height:auto;min-height:64px;padding-top:12px;padding-bottom:12px;gap
 main>header>div:first-child{flex:1;min-width:0}
 #header-profile>div{display:none}
 }
+
+/* Distribuição por dia: com o gráfico estreito (celular, painéis lado a lado) "SEG TER QUA…" se sobrepunham.
+   Abaixo de 260px de largura do próprio gráfico, os dias viram letras únicas (o nome completo fica no title e no aria-label da barra). */
+.weekday-chart{container-type:inline-size}
+.wd-short{display:none}
+@container (max-width:259px){.weekday-bar .wd-long{display:none}.weekday-bar .wd-short{display:inline}}
