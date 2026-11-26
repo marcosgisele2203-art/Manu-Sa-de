@@ -110,3 +110,10 @@ main>header>div:first-child{flex:1;min-width:0}
 /* Telefone e e-mail do paciente: um e-mail longo, sem espaços, passava da borda do cartão e era cortado.
    break-word só quebra quando a palavra não cabe na linha, então telefones e textos curtos não mudam. */
 .row-info small{overflow-wrap:break-word}
+
+/* Observação na lista de consultas: até 2 linhas. Uma observação de 500 letras transformava cada consulta num
+   bloco enorme. Tocar no texto (ou Enter) mostra tudo; o texto completo também fica em Editar. */
+.row-note{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;margin-top:2px;overflow-wrap:break-word}
+.row-note.is-clamped{cursor:pointer}
+.row-note.is-open{display:block;-webkit-line-clamp:unset;line-clamp:none}
+.row-note.is-clamped:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:4px}

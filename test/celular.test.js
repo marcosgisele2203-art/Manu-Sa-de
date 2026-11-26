@@ -37,3 +37,12 @@ assert.match(js,/<span class="wd-long">\$\{\['SEG'.*<span class="wd-short" aria-
 // Um e-mail longo, sem espaços, passava da borda do cartão do paciente e era cortado.
 test('Celular: telefone e e-mail do paciente quebram linha em vez de serem cortados',async()=>{
 assert.match(await css('/painel.css'),/\.row-info small\{overflow-wrap:break-word\}/)});
+
+// Uma observação de 500 letras transformava cada consulta da lista num bloco enorme.
+test('Agenda: observação da consulta aparece em até 2 linhas e abre ao tocar',async()=>{
+const text=await css('/painel.css');
+assert.match(text,/\.row-note\{[^}]*-webkit-line-clamp:2/,'até 2 linhas');
+assert.match(text,/\.row-note\.is-open\{[^}]*line-clamp:none/,'aberta mostra tudo');
+const js=await (await fetch(base+'/painel.js')).text();
+assert.match(js,/'<span class="row-note">'\+esc\(a\.note\)\+'<\/span>'/,'observação escapada dentro do span');
+assert.match(js,/setAttribute\('aria-expanded'/,'informa aberto ou fechado a leitores de tela')});
