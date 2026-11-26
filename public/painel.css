@@ -91,3 +91,12 @@ button,.primary,.plain,summary{-webkit-user-select:none;user-select:none}
 dialog{overscroll-behavior:contain}
 @media(pointer:coarse){input,select,textarea{font-size:16px!important}}
 @media(prefers-reduced-motion:reduce){.primary:active,.plain:active{transform:none}}
+
+/* Celular e tablet (até 700px), quando a barra lateral vira menu no topo: o cabeçalho tinha altura fixa e o
+   conteúdo (saudação + nome completo do profissional) vazava para baixo do menu. Agora ele cresce com o
+   conteúdo, a saudação usa a largura livre e o nome completo some (fica a sigla, com o nome no title). */
+@media(max-width:700px){
+main>header{height:auto;min-height:64px;padding-top:12px;padding-bottom:12px;gap:12px}
+main>header>div:first-child{flex:1;min-width:0}
+#header-profile>div{display:none}
+}
