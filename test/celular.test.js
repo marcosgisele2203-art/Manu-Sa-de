@@ -33,3 +33,7 @@ assert.match(text,/\.weekday-chart\{container-type:inline-size\}/,'o gráfico é
 assert.match(text,/@container \(max-width:259px\)\{\.weekday-bar \.wd-long\{display:none\}\.weekday-bar \.wd-short\{display:inline\}\}/,'abaixo de 260px usa as letras');
 const js=await (await fetch(base+'/painel.js')).text();
 assert.match(js,/<span class="wd-long">\$\{\['SEG'.*<span class="wd-short" aria-hidden="true">\$\{'STQQSSD'\[i\]\}/,'rótulo longo e curto, com o curto escondido de leitores de tela')});
+
+// Um e-mail longo, sem espaços, passava da borda do cartão do paciente e era cortado.
+test('Celular: telefone e e-mail do paciente quebram linha em vez de serem cortados',async()=>{
+assert.match(await css('/painel.css'),/\.row-info small\{overflow-wrap:break-word\}/)});

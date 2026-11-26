@@ -106,3 +106,7 @@ main>header>div:first-child{flex:1;min-width:0}
 .weekday-chart{container-type:inline-size}
 .wd-short{display:none}
 @container (max-width:259px){.weekday-bar .wd-long{display:none}.weekday-bar .wd-short{display:inline}}
+
+/* Telefone e e-mail do paciente: um e-mail longo, sem espaços, passava da borda do cartão e era cortado.
+   break-word só quebra quando a palavra não cabe na linha, então telefones e textos curtos não mudam. */
+.row-info small{overflow-wrap:break-word}
