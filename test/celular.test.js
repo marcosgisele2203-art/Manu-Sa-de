@@ -50,3 +50,12 @@ assert.match(js,/setAttribute\('aria-expanded'/,'informa aberto ou fechado a lei
 // Uma apresentação de um parágrafo só e longo aparecia inteira no topo da página pública e de novo logo abaixo.
 test('Página pública: resumo da apresentação no topo em até 3 linhas',async()=>{
 assert.match(await css('/consultorio.css'),/\.patient-intro\{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden\}/)});
+
+// No celular, os links do topo da página pública estavam com 9px e o subtítulo com 6px.
+test('Página pública: topo legível no celular',async()=>{
+const text=await css('/consultorio.css');
+const block=text.match(/@media\(max-width:700px\)\{\s*body\.public-office>header nav\{[^@]*?\}\s*\}/);
+assert(block,'regra do topo para até 700px');
+assert.match(block[0],/nav>a:first-child\{font-size:13px/,'links com 13px, inclusive o primeiro');
+assert.match(block[0],/nav \.primary\{flex:1 1 100%[^}]*font-size:14px/,'botão de agendar em linha própria, com 14px');
+assert.match(block[0],/small\{font-size:9px/,'subtítulo com 9px')});

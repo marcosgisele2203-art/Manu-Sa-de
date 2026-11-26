@@ -18,3 +18,14 @@ body.public-office>header,body.public-office .patient-info-strip,body.public-off
 /* Topo da página pública: a apresentação aparece inteira logo abaixo ("Por trás de cada atendimento"), então
    aqui fica só um resumo de 3 linhas. Uma apresentação de um parágrafo só e longo aparecia duas vezes inteira. */
 .patient-intro{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden}
+
+/* Topo da página pública no celular (até 700px): os links estavam com 9px, o botão com 9px e o subtítulo com 6px.
+   Agora os links têm 13px e área de toque maior, e o botão de agendar ocupa uma linha própria, com a largura toda
+   (no tamanho legível, links e botão não cabem numa linha só em 320–390px). */
+@media(max-width:700px){
+body.public-office>header nav{flex-wrap:wrap;row-gap:6px;column-gap:4px}
+body.public-office>header nav>a,body.public-office>header nav>a:first-child{font-size:13px;padding:8px 6px;margin:0 -6px}
+body.public-office>header nav .primary{flex:1 1 100%;justify-content:center;font-size:14px;padding:12px 14px}
+body.public-office .office-public-brand>span:not(.office-monogram){font-size:13px;max-width:none}
+body.public-office .office-public-brand small{font-size:9px;letter-spacing:1.2px}
+}
