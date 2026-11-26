@@ -46,3 +46,7 @@ assert.match(text,/\.row-note\.is-open\{[^}]*line-clamp:none/,'aberta mostra tud
 const js=await (await fetch(base+'/painel.js')).text();
 assert.match(js,/'<span class="row-note">'\+esc\(a\.note\)\+'<\/span>'/,'observação escapada dentro do span');
 assert.match(js,/setAttribute\('aria-expanded'/,'informa aberto ou fechado a leitores de tela')});
+
+// Uma apresentação de um parágrafo só e longo aparecia inteira no topo da página pública e de novo logo abaixo.
+test('Página pública: resumo da apresentação no topo em até 3 linhas',async()=>{
+assert.match(await css('/consultorio.css'),/\.patient-intro\{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3;overflow:hidden\}/)});
