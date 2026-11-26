@@ -117,3 +117,7 @@ main>header>div:first-child{flex:1;min-width:0}
 .row-note.is-clamped{cursor:pointer}
 .row-note.is-open{display:block;-webkit-line-clamp:unset;line-clamp:none}
 .row-note.is-clamped:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:4px}
+
+/* Calendário mensal no celular e no tablet: tinha largura máxima de 320px, então ficava mais estreito que os
+   outros cartões (sobra de 40px num celular de 390px e metade da largura no tablet). Agora ocupa o espaço do cartão. */
+@media(max-width:1000px){.dashboard-right>.compact-calendar,.compact-calendar{max-width:none}}

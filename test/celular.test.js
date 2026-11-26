@@ -59,3 +59,7 @@ assert(block,'regra do topo para até 700px');
 assert.match(block[0],/nav>a:first-child\{font-size:13px/,'links com 13px, inclusive o primeiro');
 assert.match(block[0],/nav \.primary\{flex:1 1 100%[^}]*font-size:14px/,'botão de agendar em linha própria, com 14px');
 assert.match(block[0],/small\{font-size:9px/,'subtítulo com 9px')});
+
+// No celular e no tablet o calendário tinha largura máxima de 320px e ficava mais estreito que os outros cartões.
+test('Painel: calendário mensal ocupa a largura do cartão no celular e no tablet',async()=>{
+assert.match(await css('/painel.css'),/@media\(max-width:1000px\)\{\.dashboard-right>\.compact-calendar,\.compact-calendar\{max-width:none\}\}/)});
